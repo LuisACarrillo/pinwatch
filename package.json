@@ -1,0 +1,11 @@
+{
+  "name": "pinwatch",
+  "private": true,
+  "scripts": {
+    "dev": "pnpm --filter frontend dev",
+    "build": "pnpm --filter frontend build",
+    "lint": "pnpm --filter frontend lint",
+    "preview": "pnpm --filter frontend preview"
+  },
+  "packageManager": "pnpm@12.11.2"
+}
