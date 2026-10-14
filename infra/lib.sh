@@ -61,6 +61,16 @@ lab_role_arn() {
     printf 'arn:aws:iam::%s:role/LabRole\n' "$ACCOUNT_ID"
 }
 
+# Corre un comando en una instancia por Session Manager e imprime su salida.
+# AWS-StartNonInteractiveCommand no usa un shell: recibe un solo comando con sus argumentos.
+# El plugin necesita stdin abierto mientras corre; `sleep` lo mantiene esos segundos.
+ssm_run() {
+  local id="$1" command="$2" hold="${3:-15}"
+  sleep "$hold" | timeout 60 aws ssm start-session --target "$id" \
+    --document-name AWS-StartNonInteractiveCommand \
+    --parameters "{\"command\":[\"$command\"]}" 2>&1 | tr -d '\r' || true
+}
+
 # Etiquetas que identifican los recursos de esta parte; teardown.sh solo borra lo que las tenga.
 tag_spec() {
   printf 'ResourceType=%s,Tags=[{Key=Project,Value=%s},{Key=Owner,Value=%s},{Key=Name,Value=%s}]' \

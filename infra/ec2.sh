@@ -127,7 +127,28 @@ wait_ssm_online() {
   die "La instancia no se registró en Session Manager. Revisa que use LabInstanceProfile, o usa EC2_ACCESS=ssh."
 }
 
+# Online en SSM no significa listo: el user-data puede seguir instalando psql.
+wait_bootstrap() {
+  local id="$1" attempt status
+  log "Esperando a que termine el arranque (cloud-init) de $id (hasta 5 min)"
+  for attempt in $(seq 1 20); do
+    # Cada consulta tarda ~15 s (lo que ssm_run mantiene abierta la sesión).
+    status="$(ssm_run "$id" "cloud-init status" | grep -o 'status: [a-z]*' || true)"
+    case "$status" in
+      "status: done")
+        log "Arranque terminado; psql instalado."
+        return
+        ;;
+      "status: error")
+        die "cloud-init terminó con error. Revisa /var/log/cloud-init-output.log en el bastión."
+        ;;
+    esac
+  done
+  die "El arranque de $id no terminó en 5 minutos. Revisa /var/log/cloud-init-output.log en el bastión."
+}
+
 ec2_up() {
+  [[ "$ACCESS" == "ssh" ]] || require_cmd session-manager-plugin
   local vpc instance id state ip
   vpc="$(default_vpc)"
   ensure_sg "$vpc"
@@ -172,6 +193,7 @@ ec2_up() {
 
   if [[ "$ACCESS" == "ssm" ]]; then
     wait_ssm_online "$id"
+    wait_bootstrap "$id"
     log "Entrar:  aws ssm start-session --target $id"
     log "Túnel a RDS:  bash infra/db_tunnel.sh"
   else
@@ -224,7 +246,7 @@ ec2_down() {
     # La interfaz de red de la instancia tarda unos segundos en liberarse.
     local attempt
     for attempt in $(seq 1 6); do
-      if aws ec2 delete-security-group --group-id "$sg" 2>/dev/null; then
+      if aws ec2 delete-security-group --group-id "$sg" >/dev/null 2>&1; then
         log "Security group $sg borrado."
         return
       fi

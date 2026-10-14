@@ -40,11 +40,8 @@ else
   [[ "$ping" == "Online" ]] && pass "Registrado en Session Manager" || fail "Session Manager: ${ping:-sin registro}"
 
   # 3. start-session de verdad: corre psql --version dentro del bastión.
-  #    El plugin necesita stdin abierto; sleep lo mantiene mientras corre el comando.
   if command -v session-manager-plugin >/dev/null 2>&1; then
-    out="$(sleep 15 | timeout 60 aws ssm start-session --target "$id" \
-      --document-name AWS-StartNonInteractiveCommand \
-      --parameters '{"command":["psql --version"]}' 2>&1 | tr -d '\r' || true)"
+    out="$(ssm_run "$id" "psql --version")"
     version="$(grep -o 'psql (PostgreSQL) [0-9.]*' <<<"$out" || true)"
     [[ -n "$version" ]] && pass "start-session funciona; en el bastión: $version" ||
       fail "start-session no devolvió psql --version -> $(grep . <<<"$out" | tail -n 1)"
