@@ -102,24 +102,28 @@ pnpm lint
 pnpm preview
 ```
 
-## Infraestructura de Luis Fernando: Secrets Manager y bastión EC2
+## Infraestructura de Luis Fernando: Secrets Manager, bastión EC2 y Flujo 2
 
-Todo se crea con la AWS CLI desde scripts de bash en `infra/`. Cada script se puede correr varias veces: si el recurso ya existe, lo reusa. `teardown.sh` borra solo lo que crean estos scripts (recursos con las etiquetas `Project=pinwatch` y `Owner=luis-fernando`); no toca el bucket de originales ni la base de datos RDS.
+Todo se crea con la AWS CLI desde scripts de bash en `infra/`. Cada script se puede correr varias veces: si el recurso ya existe, lo reusa. `teardown.sh` borra solo lo que crean estos scripts (recursos con las etiquetas `Project=pinwatch` y `Owner=luis-fernando`). No borra el bucket de originales (de él solo retira la notificación del Flujo 2) ni la base de datos RDS.
 
 | Servicio | Recurso | Para qué |
 | --- | --- | --- |
 | Secrets Manager | Secreto `pinwatch/app` | JSON con la configuración sensible: `jwt_signing_key` y `jwt_algorithm` (los genera `up.sh`) y los datos de la base `db_*` (los agrega quien crea la RDS). Nada de esto vive en el repo. |
 | EC2 | Instancia `pinwatch-bastion` (`t3.micro`, Amazon Linux 2023, `LabInstanceProfile`, cliente `psql` 16) | Bastión para entrar a la RDS privada: consola, `psql` y túnel para migraciones. El flujo de la aplicación no depende de que esté prendida. |
 | EC2 | Security group `pinwatch-bastion-sg` | Sin reglas de entrada. Se entra por Session Manager, no por SSH. |
+| Lambda | `pinwatch-image-processor` (Python 3.14, x86_64, 1024 MB, `LabRole`) | Flujo 2: valida cada imagen nueva de `originals/`, genera la versión comprimida y la miniatura en WebP. |
+| S3 | Notificación `pinwatch-image-processor` en `pinwatch-originals-<cuenta>` | Dispara la Lambda con `s3:ObjectCreated:*` solo en el prefijo `originals/`. Las demás notificaciones del bucket se conservan. |
+| S3 | Bucket `pinwatch-processed-<cuenta>` (privado, cifrado) | Resultado del Flujo 2: `processed/<uuid>/<nombre>.webp` (1600 px de ancho máximo) y `thumbnails/<uuid>/<nombre>.webp` (400 px). |
+| CloudWatch Logs | `/aws/lambda/pinwatch-image-processor` (retención de 7 días) | Una línea JSON por imagen: `imagen_procesada` o `imagen_rechazada` con el motivo. |
 
-Costo: la instancia cobra solo mientras está prendida (~USD 0.015/h con su IP pública); el disco de 8 GB y el secreto cobran aunque esté apagada (~USD 0.64 y 0.40 al mes). Con `teardown.sh` el costo queda en cero.
+Costo: la instancia cobra solo mientras está prendida (~USD 0.015/h con su IP pública); el disco de 8 GB y el secreto cobran aunque esté apagada (~USD 0.64 y 0.40 al mes). La Lambda, S3 y los logs cobran solo por uso (centavos en las pruebas). Con `teardown.sh` el costo queda en cero.
 
 ### Requisitos previos
 
 - Learner Lab iniciado (indicador en verde).
 - Las credenciales de **AWS Details** copiadas en `~/.aws/credentials` de Ubuntu (WSL): `aws_access_key_id`, `aws_secret_access_key` y `aws_session_token`.
 - Región `us-east-1` (`aws configure set region us-east-1`). Los scripts se niegan a correr en otra.
-- En Ubuntu: AWS CLI v2, `python3`, `openssl`, `curl` y [session-manager-plugin](https://docs.aws.amazon.com/systems-manager/latest/userguide/install-plugin-debian-and-ubuntu.html):
+- En Ubuntu: AWS CLI v2, `python3` con `python3-venv` (arma el zip de la Lambda), `openssl`, `curl` y [session-manager-plugin](https://docs.aws.amazon.com/systems-manager/latest/userguide/install-plugin-debian-and-ubuntu.html):
 
 ```bash
 curl -fsSLo /tmp/smp.deb https://s3.amazonaws.com/session-manager-downloads/plugin/latest/ubuntu_64bit/session-manager-plugin.deb
@@ -132,13 +136,13 @@ En Ubuntu, desde la raíz del repositorio:
 
 ```bash
 bash infra/check_lab.sh          # 1. el lab permite lo necesario (no deja nada creado)
-bash infra/up.sh                 # 2. crea o reusa el secreto y el bastión (~3 min la primera vez)
-bash infra/verify.sh             # 3. comprueba que todo funciona
+bash infra/up.sh                 # 2. crea o reusa el secreto, el bastión y el Flujo 2 (~4 min la primera vez)
+bash infra/verify.sh             # 3. comprueba que todo funciona (incluye subir una imagen de prueba)
 bash infra/teardown.sh --status  #    muestra qué existe, sin borrar
 bash infra/teardown.sh           # 4. borra todo, pide confirmación (--yes para no preguntar)
 ```
 
-Cada servicio también se maneja por separado: `bash infra/secrets.sh up|status|down` y `bash infra/ec2.sh up|status|down` (`down` acepta `--yes`).
+Cada servicio también se maneja por separado: `bash infra/secrets.sh up|status|down`, `bash infra/ec2.sh up|status|down` y `bash infra/image_processor.sh up|status|down` (`down` acepta `--yes`).
 
 ### Entrar al bastión y a la base
 
@@ -163,12 +167,57 @@ db = database_settings()  # host, port, name, username, password
 
 Si la RDS se crea con `--manage-master-user-password`, RDS guarda usuario y contraseña en su propio secreto (`rds!db-…`) y lo rota cada 7 días. En ese caso `pinwatch/app` lleva `db_secret_arn` con el ARN de ese secreto, en lugar de `db_username` y `db_password`, y el helper lo sigue. Así nunca queda una copia vieja de la contraseña. Si la base rechaza la contraseña tras una rotación, `app_secrets.clear_cache()` fuerza a releerla.
 
-Pruebas del helper (no llaman a AWS):
+Pruebas del helper y del Flujo 2 (no llaman a AWS; S3 se simula con moto):
 
 ```bash
 ~/pinwatch-venv/bin/pip install -r backend/requirements-dev.txt
 ~/pinwatch-venv/bin/python -m pytest backend
 ```
+
+### Flujo 2: procesamiento de imágenes
+
+Cuando el formulario de un pin sube la imagen a `s3://pinwatch-originals-<cuenta>/originals/<uuid>/<archivo>` (Flujo 1), S3 invoca la Lambda `pinwatch-image-processor` en segundo plano. El usuario no espera a que termine. El código está en `backend/image_processor/`, separado de la API.
+
+1. **Validación.** Se revisa el contenido real del archivo, no la extensión: máximo 15 MB (se revisa con el tamaño del evento, antes de descargar), formatos JPEG, PNG o WebP, y máximo 40 megapíxeles.
+2. **Procesamiento.** Endereza la foto según el EXIF, quita los metadatos (GPS, cámara) y genera `processed/<uuid>/<nombre>.webp` (1600 px de ancho máximo) y `thumbnails/<uuid>/<nombre>.webp` (400 px) en `pinwatch-processed-<cuenta>`.
+3. **Resultado.** Escribe una línea JSON en CloudWatch: `imagen_procesada` (tamaños, medidas, duración) o `imagen_rechazada` (con el motivo).
+
+Para que no haya ciclos ni bucles:
+- El trigger solo escucha `originals/`, y la Lambda escribe en otro bucket.
+- Un archivo inválido se registra y la Lambda termina sin error, así que no se reintenta.
+- Un error transitorio de S3 se reintenta una sola vez.
+- Si S3 entrega el mismo evento dos veces, el resultado se sobrescribe y no se duplica.
+
+El zip se arma en WSL con los wheels `manylinux2014_x86_64` de Pillow para Python 3.14, sin Docker. Antes de subirlo se prueba en local, y si el código no cambió no se vuelve a subir.
+
+**Probarlo de punta a punta desde el frontend.** Necesitas la API corriendo en Ubuntu (sección Backend) y `pnpm dev` en Windows (sección Frontend):
+
+1. En [http://localhost:5173](http://localhost:5173), **Nuevo pin**: llena título y categoría, elige una foto y publícala.
+2. En Ubuntu, sigue los logs de la Lambda (la línea aparece en segundos):
+
+   ```bash
+   aws logs tail /aws/lambda/pinwatch-image-processor --since 10m --follow --format short
+   ```
+
+   ```text
+   {"event": "imagen_procesada", "key": "originals/<uuid>/foto.jpg", ..., "thumbnail_dimensions": "400x300", "duration_ms": 361}
+   ```
+
+3. Lista la miniatura y ábrela con una URL prefirmada de 5 minutos:
+
+   ```bash
+   aws s3 ls s3://pinwatch-processed-<cuenta>/thumbnails/ --recursive
+   aws s3 presign s3://pinwatch-processed-<cuenta>/thumbnails/<uuid>/<nombre>.webp --expires-in 300
+   ```
+
+**Pendiente para Dario (Flujo 3):**
+- `pinwatch-processed-<cuenta>` es privado, así que el feed necesita URLs prefirmadas de lectura (`generate_presigned_url("get_object", ...)`) para mostrar las miniaturas.
+- La tabla `pins` necesita estas columnas:
+  - `original_key`: única; con ella la Lambda encuentra el pin.
+  - `status`: `pending`, `processed` o `rejected`.
+  - `processed_key`.
+  - `thumbnail_key`.
+- `backend/image_processor/pin_store.py` tiene aislada la función `update_pin_record()`. Hoy solo escribe en el log (`pin_pendiente_de_guardar`); ahí va el `UPDATE` cuando exista la tabla.
 
 ### Variables de entorno
 
@@ -182,6 +231,8 @@ Los scripts leen la cuenta y la región de la sesión de la AWS CLI; las variabl
 | `EC2_INSTANCE_TYPE` | `t3.micro` | Tipo de la instancia del bastión. |
 | `EC2_ACCESS` | `ssm` | `ssh` abre el puerto 22 a `SSH_CIDR` como respaldo si Session Manager falla. |
 | `SSH_CIDR` | Tu IP pública `/32` | Origen permitido para SSH con `EC2_ACCESS=ssh`. |
+| `LAMBDA_RUNTIME` | `python3.14` | Runtime de la Lambda del Flujo 2; el zip se arma para esa versión. |
+| `ORIGINALS_BUCKET`, `PROCESSED_BUCKET` | `pinwatch-originals-<cuenta>`, `pinwatch-processed-<cuenta>` | Buckets de entrada y salida del Flujo 2. La Lambda recibe `PROCESSED_BUCKET` como variable de entorno. |
 
 ### Verificar que funciona
 
@@ -193,7 +244,13 @@ Los scripts leen la cuenta y la región de la sesión de la AWS CLI; las variabl
 [verify] OK     Registrado en Session Manager
 [verify] OK     start-session funciona; en el bastión: psql (PostgreSQL) 16.x
 [verify] OK     Security group sin reglas de entrada
-[verify] Todo funciona.
+[verify] Subidos originals/verify-<ts>/prueba.png y originals/verify-<ts>/falsa.jpg; esperando a la Lambda (hasta 90 s)
+[verify] OK     Imagen válida procesada: processed/ y thumbnails/ en pinwatch-processed-<cuenta> (miniatura: image/webp 1290 bytes)
+[verify] OK     Log en CloudWatch: imagen_procesada
+[verify] OK     Archivo falso rechazado en el log (not_an_image), sin error de la Lambda
+[verify] OK     El archivo falso no generó nada en pinwatch-processed-<cuenta>
+[verify] OK     La Lambda no escribió en el bucket de originales
+[verify] Todo funciona. Se borraron los archivos de prueba de ambos buckets.
 ```
 
 ### Problemas comunes del Learner Lab
@@ -204,4 +261,7 @@ Los scripts leen la cuenta y la región de la sesión de la AWS CLI; las variabl
 - **El nombre `pinwatch/app` está ocupado justo después de un teardown**: Secrets Manager tarda unos segundos en liberar el nombre; `secrets.sh` reintenta solo.
 - **`DependencyViolation` al borrar el security group**: la interfaz de red de la instancia tardó en liberarse. Repite `bash infra/teardown.sh --yes` en un minuto.
 - **Session Manager no registra la instancia**: como respaldo, `EC2_ACCESS=ssh bash infra/ec2.sh up` abre el 22 solo a tu IP; entra con `ssh -i ~/.ssh/labsuser.pem ec2-user@<IP>` (`labsuser.pem` se descarga en **AWS Details**).
+- **Subí un pin y no aparece la miniatura**: revisa `aws logs tail /aws/lambda/pinwatch-image-processor --since 10m`. Si dice `imagen_rechazada`, el `reason` explica por qué (`not_an_image`, `format_not_allowed`, `too_large`, `too_many_pixels`). Si no hay ninguna línea, confirma con `bash infra/image_processor.sh status` que la notificación esté activa.
+- **`image_processor.sh up` dice que otra notificación ya escucha `originals/`**: S3 no permite dos notificaciones que se traslapen en prefijo y evento. Hay que acordarlo con quien la configuró; el script no la borra.
+- **`badly formed help string`**: es un error de la AWS CLI de Ubuntu con Python 3.14 en algunos comandos (`s3api list-objects-v2`, `ssm send-command`). Los scripts no los usan; si los necesitas a mano, usa `aws s3 ls` o instala la AWS CLI v2 oficial.
 - **`AccessDenied`**: la acción está restringida en Learner Lab. No uses otra cuenta ni otro rol; avisa al equipo.
