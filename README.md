@@ -101,3 +101,71 @@ pnpm build
 pnpm lint
 pnpm preview
 ```
+
+## Infraestructura de Luis Fernando: Secrets Manager y EC2
+
+Todo se crea con la AWS CLI desde scripts de bash en `infra/`. Cada script se puede correr varias veces: si el recurso ya existe, lo reusa. `teardown.sh` borra solo lo que crean estos scripts (recursos con las etiquetas `Project=pinwatch` y `Owner=luis-fernando`); no toca el bucket de originales ni la base de datos RDS.
+
+| Servicio | Recurso | Para qué |
+| --- | --- | --- |
+| Secrets Manager | `pinwatch/jwt` | Llave de firma de los JWT (`jwt_signing_key`, `jwt_algorithm`). La API la lee al arrancar; nunca vive en el repo. |
+| EC2 | Instancia `pinwatch-aux` (`t3.micro`, Amazon Linux 2023, `LabInstanceProfile`, key pair `vockey`) | Servicios auxiliares: aloja el runner de GitHub Actions que despliega. El flujo de la aplicación no depende de que esté prendida. |
+| EC2 | Security group `pinwatch-aux-sg` | Solo SSH (22) desde la IP pública de quien corre `up.sh`. |
+
+Costo: la instancia cobra solo mientras está prendida (~USD 0.015/h con su IP pública); el disco de 8 GB y el secreto cobran poco aunque esté apagada (~USD 0.64 y 0.40 al mes). Con `teardown.sh` el costo queda en cero.
+
+### Requisitos previos
+
+- Learner Lab iniciado (indicador en verde).
+- Las credenciales de **AWS Details** copiadas en `~/.aws/credentials` de Ubuntu (WSL): `aws_access_key_id`, `aws_secret_access_key` y `aws_session_token`.
+- Región `us-east-1` (`aws configure set region us-east-1`). Los scripts se niegan a correr en otra.
+- `aws`, `openssl` y `curl` en Ubuntu.
+
+### Levantar, revisar y bajar
+
+En Ubuntu, desde la raíz del repositorio:
+
+```bash
+bash infra/up.sh                 # crea o reusa el secreto y la instancia
+bash infra/teardown.sh --status  # muestra qué existe, sin borrar
+bash infra/teardown.sh           # borra todo, pide confirmación
+bash infra/teardown.sh --yes     # borra todo sin preguntar
+```
+
+Cada servicio también se maneja por separado: `bash infra/secrets.sh up|status|down` y `bash infra/ec2.sh up|status|down` (`down` acepta `--yes`).
+
+### Variables de entorno
+
+Todas son opcionales; los scripts leen la cuenta y la región de la sesión de la AWS CLI.
+
+| Variable | Por defecto | Uso |
+| --- | --- | --- |
+| `JWT_SECRET_NAME` | `pinwatch/jwt` | Nombre del secreto de JWT. La API usará el mismo valor. |
+| `EC2_INSTANCE_TYPE` | `t3.micro` | Tipo de la instancia auxiliar. |
+| `SSH_CIDR` | Tu IP pública `/32` (de `checkip.amazonaws.com`) | Origen permitido para SSH. |
+
+### Verificar que funciona
+
+```bash
+aws secretsmanager describe-secret --secret-id pinwatch/jwt --query '[Name, ARN]' --output text
+# pinwatch/jwt   arn:aws:secretsmanager:us-east-1:<cuenta>:secret:pinwatch/jwt-XXXXXX
+
+aws ec2 describe-instances --filters Name=tag:Name,Values=pinwatch-aux \
+  --query 'Reservations[].Instances[].[InstanceId, State.Name, PublicIpAddress]' --output text
+# i-0123456789abcdef0   running   3.80.x.x
+```
+
+Para entrar por SSH, descarga `labsuser.pem` desde **AWS Details** (es la llave de `vockey`):
+
+```bash
+cp /mnt/c/Users/<usuario>/Downloads/labsuser.pem ~/.ssh/ && chmod 400 ~/.ssh/labsuser.pem
+ssh -i ~/.ssh/labsuser.pem ec2-user@<IP pública>
+```
+
+### Problemas comunes del Learner Lab
+
+- **`Las credenciales no son válidas o vencieron` / `ExpiredToken`**: la sesión del lab dura unas 4 horas. Reinicia el lab y vuelve a copiar las tres líneas de **AWS Details** a `~/.aws/credentials`.
+- **La instancia aparece en `stopped`**: el lab la apaga al terminar la sesión. `bash infra/up.sh` la vuelve a arrancar; la IP pública cambia cada vez.
+- **SSH no responde**: tu IP cambió desde la última vez. `bash infra/up.sh` actualiza la regla del security group.
+- **`DependencyViolation` al borrar el security group**: la interfaz de red de la instancia tardó en liberarse. Repite `bash infra/teardown.sh --yes` en un minuto.
+- **`AccessDenied`**: la acción está restringida en Learner Lab. No uses otra cuenta ni otro rol; avisa al equipo.
