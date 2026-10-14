@@ -9,7 +9,7 @@ aws_session
 
 log "1/2 Secrets Manager"
 bash "$INFRA_DIR/secrets.sh" up
-log "2/2 EC2 de servicios auxiliares"
+log "2/2 Bastión EC2"
 bash "$INFRA_DIR/ec2.sh" up
 
-log "Todo arriba. Revisa el estado con: bash infra/teardown.sh --status"
+log "Todo arriba. Compruébalo con: bash infra/verify.sh"

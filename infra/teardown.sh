@@ -27,7 +27,7 @@ bash "$INFRA_DIR/secrets.sh" status
 confirm "Se borrará todo lo anterior en la cuenta $ACCOUNT_ID. ¿Continuar?" || die "Cancelado."
 
 # Orden: primero lo que depende de otros recursos (instancia, luego su security group), al final los secretos.
-log "1/2 EC2 de servicios auxiliares"
+log "1/2 Bastión EC2"
 bash "$INFRA_DIR/ec2.sh" down --yes
 log "2/2 Secrets Manager"
 bash "$INFRA_DIR/secrets.sh" down --yes
