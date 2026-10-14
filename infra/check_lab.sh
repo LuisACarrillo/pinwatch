@@ -61,6 +61,27 @@ check "Secrets Manager: borrar sin recuperación" \
   aws secretsmanager delete-secret --secret-id "$SMOKE_NAME" --force-delete-without-recovery \
   --query Name --output text
 
+# Lambda: crear y borrar una función mínima con LabRole y el runtime del Flujo 2.
+LAMBDA_RUNTIME="${LAMBDA_RUNTIME:-python3.14}"
+PROBE_NAME="pinwatch-check-$(date +%s)"
+PROBE_DIR="$(mktemp -d)"
+cleanup_lambda() {
+  aws lambda delete-function --function-name "$PROBE_NAME" >/dev/null 2>&1 || true
+  rm -rf "$PROBE_DIR"
+}
+trap 'cleanup; cleanup_lambda' EXIT
+printf 'def handler(event, context):\n    return "ok"\n' >"$PROBE_DIR/probe.py"
+python3 -c 'import sys, zipfile; zipfile.ZipFile(sys.argv[1], "w").write(sys.argv[2], "probe.py")' \
+  "$PROBE_DIR/probe.zip" "$PROBE_DIR/probe.py"
+check "Lambda: crear función con LabRole y $LAMBDA_RUNTIME" \
+  aws lambda create-function --function-name "$PROBE_NAME" --runtime "$LAMBDA_RUNTIME" \
+  --role "$(lab_role_arn)" --handler probe.handler --zip-file "fileb://$PROBE_DIR/probe.zip" \
+  --query Runtime --output text
+check "Lambda: borrar la función de prueba" \
+  aws lambda delete-function --function-name "$PROBE_NAME"
+check "CloudWatch Logs: listar log groups" \
+  aws logs describe-log-groups --log-group-name-prefix /aws/lambda/pinwatch --query 'length(logGroups)' --output text
+
 if ((FAILURES > 0)); then
   die "$FAILURES prueba(s) fallaron. Revisa los mensajes antes de correr up.sh."
 fi
