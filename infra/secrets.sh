@@ -86,17 +86,22 @@ secrets_up() {
 }
 
 secrets_status() {
-  local info keys
+  local info keys arn deleted
   info="$(describe_secret "$APP_SECRET_NAME")"
   if [[ -z "$info" ]]; then
     log "$APP_SECRET_NAME: no existe"
+    return
+  fi
+  read -r arn deleted <<<"$info"
+  if [[ "$deleted" != "None" ]]; then
+    log "$APP_SECRET_NAME: borrándose (desde $deleted); desaparece en unos segundos"
     return
   fi
   keys="$(aws secretsmanager get-secret-value --secret-id "$APP_SECRET_NAME" \
     --query SecretString --output text 2>/dev/null |
     python3 -c 'import json, sys; print(", ".join(sorted(json.load(sys.stdin))))' 2>/dev/null ||
     echo "no se pudo leer")"
-  log "$APP_SECRET_NAME: $info"
+  log "$APP_SECRET_NAME: $arn"
   log "Llaves: $keys"
 }
 
