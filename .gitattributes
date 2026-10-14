@@ -1,0 +1,2 @@
+# Los scripts de bash corren en WSL/Linux; un \r al final de línea los rompe.
+*.sh text eol=lf
