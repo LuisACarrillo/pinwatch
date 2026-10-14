@@ -1,21 +1,29 @@
 #!/usr/bin/env bash
-# Instancia EC2 de servicios auxiliares de PinWatch (runner de GitHub Actions).
+# Bastión EC2 de PinWatch: puerta de entrada a la base RDS privada (psql, migraciones).
 #   infra/ec2.sh up       crea la instancia o arranca la existente
-#   infra/ec2.sh status   muestra estado e IP
+#   infra/ec2.sh status   muestra estado, IP y registro en Session Manager
 #   infra/ec2.sh down     termina la instancia y borra su security group
 #
-# Variables opcionales:
+# Se entra por Session Manager, sin puertos abiertos. Variables opcionales:
 #   EC2_INSTANCE_TYPE  tipo de instancia (t3.micro por defecto)
+#   EC2_ACCESS         ssm (por defecto) o ssh; con ssh se abre el 22 solo a SSH_CIDR
 #   SSH_CIDR           origen permitido para SSH (por defecto, tu IP pública /32)
 set -euo pipefail
 source "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
 
-INSTANCE_NAME="pinwatch-aux"
-SG_NAME="pinwatch-aux-sg"
+INSTANCE_NAME="pinwatch-bastion"
+SG_NAME="pinwatch-bastion-sg"
 INSTANCE_TYPE="${EC2_INSTANCE_TYPE:-t3.micro}"
+ACCESS="${EC2_ACCESS:-ssm}"
 KEY_NAME="vockey"
 INSTANCE_PROFILE="LabInstanceProfile"
 AMI_PARAMETER="/aws/service/ami-amazon-linux-latest/al2023-ami-kernel-default-x86_64"
+# El agente de SSM ya viene en Amazon Linux 2023; solo falta el cliente de PostgreSQL.
+USER_DATA='#!/bin/bash
+dnf install -y postgresql16 || dnf install -y postgresql15
+'
+
+[[ "$ACCESS" == "ssm" || "$ACCESS" == "ssh" ]] || die "EC2_ACCESS debe ser ssm o ssh."
 
 default_vpc() {
   local vpc
@@ -41,12 +49,17 @@ find_instance() {
     --output text | head -n 1
 }
 
+ssh_rules() {
+  aws ec2 describe-security-groups --group-ids "$1" \
+    --query 'SecurityGroups[0].IpPermissions[?FromPort==`22`].IpRanges[].CidrIp' --output text
+}
+
 ensure_sg() {
-  local vpc="$1" sg cidr
+  local vpc="$1" sg
   sg="$(find_sg)"
   if [[ -z "$sg" ]]; then
     sg="$(aws ec2 create-security-group --group-name "$SG_NAME" --vpc-id "$vpc" \
-      --description "PinWatch servicios auxiliares: SSH desde la IP del equipo" \
+      --description "PinWatch bastion: sin entrada, acceso por Session Manager" \
       --tag-specifications "$(tag_spec security-group "$SG_NAME")" \
       --query GroupId --output text)"
     log "Security group creado: $sg"
@@ -54,24 +67,25 @@ ensure_sg() {
     log "Security group existente: $sg"
   fi
 
-  cidr="${SSH_CIDR:-$(curl -fsS https://checkip.amazonaws.com | tr -d '[:space:]')/32}"
-  # Quita reglas SSH de IPs anteriores para no acumular orígenes abiertos.
+  local cidr=""
+  if [[ "$ACCESS" == "ssh" ]]; then
+    cidr="${SSH_CIDR:-$(curl -fsS https://checkip.amazonaws.com | tr -d '[:space:]')/32}"
+  fi
+  # Retira las reglas SSH que no correspondan: todas en modo ssm, las de IPs viejas en modo ssh.
   local old
-  for old in $(aws ec2 describe-security-groups --group-ids "$sg" \
-    --query 'SecurityGroups[0].IpPermissions[?FromPort==`22`].IpRanges[].CidrIp' --output text); do
+  for old in $(ssh_rules "$sg"); do
     if [[ "$old" != "$cidr" ]]; then
       aws ec2 revoke-security-group-ingress --group-id "$sg" \
         --protocol tcp --port 22 --cidr "$old" >/dev/null
-      log "Regla SSH anterior retirada: $old"
+      log "Regla SSH retirada: $old"
     fi
   done
-  if ! aws ec2 describe-security-groups --group-ids "$sg" \
-    --query 'SecurityGroups[0].IpPermissions[?FromPort==`22`].IpRanges[].CidrIp' \
-    --output text | grep -qx "$cidr"; then
+  if [[ -n "$cidr" ]] && ! ssh_rules "$sg" | tr '\t' '\n' | grep -qx "$cidr"; then
     aws ec2 authorize-security-group-ingress --group-id "$sg" \
       --protocol tcp --port 22 --cidr "$cidr" >/dev/null
     log "SSH permitido desde $cidr"
   fi
+  [[ "$ACCESS" == "ssm" ]] && log "Sin reglas de entrada: el acceso es por Session Manager."
   SG_ID="$sg"
 }
 
@@ -93,6 +107,24 @@ pick_subnet() {
     --filters "Name=vpc-id,Values=$vpc" "Name=default-for-az,Values=true" \
     "Name=availability-zone,Values=$zones" \
     --query 'sort_by(Subnets, &AvailabilityZone)[0].SubnetId' --output text
+}
+
+ssm_ping() {
+  aws ssm describe-instance-information --filters "Key=InstanceIds,Values=$1" \
+    --query 'InstanceInformationList[0].PingStatus' --output text 2>/dev/null || echo "desconocido"
+}
+
+wait_ssm_online() {
+  local id="$1" attempt
+  log "Esperando a que $id se registre en Session Manager (hasta 5 min)"
+  for attempt in $(seq 1 30); do
+    if [[ "$(ssm_ping "$id")" == "Online" ]]; then
+      log "Registrada en Session Manager (Online)."
+      return
+    fi
+    sleep 10
+  done
+  die "La instancia no se registró en Session Manager. Revisa que use LabInstanceProfile, o usa EC2_ACCESS=ssh."
 }
 
 ec2_up() {
@@ -117,6 +149,7 @@ ec2_up() {
     ami="$(latest_ami)"
     subnet="$(pick_subnet "$vpc")"
     log "Creando $INSTANCE_NAME ($INSTANCE_TYPE, $ami) en $subnet"
+    # vockey se asocia siempre para poder pasar a SSH sin recrear la instancia.
     id="$(aws ec2 run-instances \
       --image-id "$ami" \
       --instance-type "$INSTANCE_TYPE" \
@@ -124,9 +157,8 @@ ec2_up() {
       --iam-instance-profile "Name=$INSTANCE_PROFILE" \
       --subnet-id "$subnet" \
       --security-group-ids "$SG_ID" \
-      --associate-public-ip-address \
       --metadata-options "HttpTokens=required,HttpEndpoint=enabled" \
-      --user-data "$(printf '#!/bin/bash\ndnf install -y git jq\n')" \
+      --user-data "$USER_DATA" \
       --tag-specifications "$(tag_spec instance "$INSTANCE_NAME")" "$(tag_spec volume "$INSTANCE_NAME")" \
       --query 'Instances[0].InstanceId' --output text)"
     log "Instancia creada: $id"
@@ -136,19 +168,34 @@ ec2_up() {
   aws ec2 wait instance-running --instance-ids "$id"
   ip="$(aws ec2 describe-instances --instance-ids "$id" \
     --query 'Reservations[0].Instances[0].PublicIpAddress' --output text)"
-  log "Lista: $id, IP pública $ip"
-  log "SSH: ssh -i ~/.ssh/labsuser.pem ec2-user@$ip"
+  log "En marcha: $id, IP pública $ip"
+
+  if [[ "$ACCESS" == "ssm" ]]; then
+    wait_ssm_online "$id"
+    log "Entrar:  aws ssm start-session --target $id"
+    log "Túnel a RDS:  bash infra/db_tunnel.sh"
+  else
+    log "Entrar:  ssh -i ~/.ssh/labsuser.pem ec2-user@$ip"
+  fi
 }
 
 ec2_status() {
-  local instance
+  local instance id
   instance="$(find_instance)"
   if [[ -z "$instance" ]]; then
     log "$INSTANCE_NAME: no existe"
   else
+    read -r id _ <<<"$instance"
     log "$INSTANCE_NAME: $instance"
+    log "Session Manager: $(ssm_ping "$id")"
   fi
-  log "$SG_NAME: $(find_sg)"
+  local sg
+  sg="$(find_sg)"
+  if [[ -z "$sg" ]]; then
+    log "$SG_NAME: no existe"
+  else
+    log "$SG_NAME: $sg, SSH abierto a: $(ssh_rules "$sg" | tr '\t' ' ' | grep . || echo nadie)"
+  fi
 }
 
 ec2_down() {
@@ -176,7 +223,7 @@ ec2_down() {
   if [[ -n "$sg" ]]; then
     # La interfaz de red de la instancia tarda unos segundos en liberarse.
     local attempt
-    for attempt in 1 2 3 4 5 6; do
+    for attempt in $(seq 1 6); do
       if aws ec2 delete-security-group --group-id "$sg" 2>/dev/null; then
         log "Security group $sg borrado."
         return
