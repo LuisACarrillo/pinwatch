@@ -696,6 +696,10 @@ h3 {
   margin: 0;
 }
 
+.form-actions button:disabled {
+  opacity: 0.55;
+}
+
 .form-error {
   margin: 0;
   color: #8d2e24;

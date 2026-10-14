@@ -1,4 +1,5 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
+import { requestPresignedUpload, uploadOriginal } from "../services/api.js";
 
 export default function CreatePinModal({ categories, onClose, onCreate }) {
   const [title, setTitle] = useState("");
@@ -7,14 +8,23 @@ export default function CreatePinModal({ categories, onClose, onCreate }) {
   const [file, setFile] = useState(null);
   const [preview, setPreview] = useState("");
   const [error, setError] = useState("");
+  const [submitting, setSubmitting] = useState(false);
+  const alive = useRef(true);
+
+  useEffect(() => {
+    alive.current = true;
+    return () => {
+      alive.current = false;
+    };
+  }, []);
 
   useEffect(() => {
     function onKey(event) {
-      if (event.key === "Escape") onClose();
+      if (event.key === "Escape" && !submitting) onClose();
     }
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
-  }, [onClose]);
+  }, [onClose, submitting]);
 
   useEffect(() => {
     return () => {
@@ -31,23 +41,46 @@ export default function CreatePinModal({ categories, onClose, onCreate }) {
     });
   }
 
-  function onSubmit(event) {
+  async function onSubmit(event) {
     event.preventDefault();
     const trimmed = title.trim();
     if (!trimmed) {
       setError("Escribe un título.");
       return;
     }
-    onCreate({
-      title: trimmed,
-      description: description.trim(),
-      category,
-      file,
-    });
+    if (!file) {
+      setError("Selecciona una imagen.");
+      return;
+    }
+    const contentType = file.type || "application/octet-stream";
+    setSubmitting(true);
+    setError("");
+    try {
+      const presign = await requestPresignedUpload({
+        title: trimmed,
+        description: description.trim(),
+        category,
+        filename: file.name,
+        contentType,
+      });
+      await uploadOriginal(presign.url, file, presign.content_type);
+      if (!alive.current) return;
+      onCreate({
+        title: trimmed,
+        description: description.trim(),
+        category,
+        file,
+        objectKey: presign.key,
+      });
+    } catch (uploadError) {
+      if (!alive.current) return;
+      setError(uploadError.message);
+      setSubmitting(false);
+    }
   }
 
   return (
-    <div className="modal-back" onClick={onClose}>
+    <div className="modal-back" onClick={submitting ? undefined : onClose}>
       <form
         className="sheet"
         role="dialog"
@@ -88,16 +121,16 @@ export default function CreatePinModal({ categories, onClose, onCreate }) {
         </label>
         <label className="field">
           Imagen
-          <input type="file" accept="image/*" onChange={onFile} />
+          <input type="file" accept="image/*" onChange={onFile} disabled={submitting} />
         </label>
         {preview ? <img className="preview" src={preview} alt="" /> : null}
         {error ? <p className="form-error">{error}</p> : null}
         <div className="form-actions">
-          <button type="button" className="text-action" onClick={onClose}>
+          <button type="button" className="text-action" onClick={onClose} disabled={submitting}>
             Cancelar
           </button>
-          <button type="submit" className="is-current">
-            Agregar
+          <button type="submit" className="is-current" disabled={submitting}>
+            {submitting ? "Subiendo…" : "Agregar"}
           </button>
         </div>
       </form>

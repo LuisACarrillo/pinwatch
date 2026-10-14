@@ -104,7 +104,7 @@ export default function App() {
     );
   }
 
-  function createPin({ title, description, category: pinCategory, file }) {
+  function createPin({ title, description, category: pinCategory, file, objectKey }) {
     const look = noteLooks[pins.length % noteLooks.length];
     const pin = {
       id: crypto.randomUUID(),
@@ -112,6 +112,7 @@ export default function App() {
       description,
       category: pinCategory,
       imageUrl: file ? URL.createObjectURL(file) : undefined,
+      objectKey,
       ...look,
     };
     setPins((current) => [pin, ...current]);
