@@ -1,0 +1,2 @@
+# Dependencias que viajan en el zip de la Lambda. boto3 ya viene en el runtime.
+Pillow==12.2.0

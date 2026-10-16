@@ -1,0 +1,9 @@
+# Flujo 2: procesamiento de imágenes en segundo plano
+
+## ¿Por qué un trigger de S3 con Lambda?
+
+Cuando el usuario publica un pin, la imagen viaja directo del navegador a S3 con una URL prefirmada, y la API nunca carga el archivo. Comprimir y generar la miniatura es el trabajo pesado del sistema, así que no lo hacemos en la request: S3 emite un evento al crear el objeto en `originals/` y ese evento invoca una función Lambda de forma asíncrona. El usuario recibe su respuesta de inmediato. Lambda escala sola con el número de subidas y solo cobra por los milisegundos de cada imagen (unos 360 ms con 1024 MB). Así se cumple la idea de separar cargas que plantea el proyecto: subir archivos pesados no satura a quien sirve el feed.
+
+La función valida el contenido real del archivo con Pillow y no la extensión, limita el tamaño y los megapíxeles, y acepta solo JPEG, PNG y WebP. Genera dos WebP: una versión de 1600 px y una miniatura de 400 px para el feed, con la orientación corregida y sin metadatos EXIF, para no publicar la ubicación GPS de las fotos. El resultado se guarda en un bucket aparte, `pinwatch-processed-<cuenta>`. Así el ciclo infinito queda imposible por diseño (el trigger solo escucha `originals/` del otro bucket), los originales siguen privados y el teardown puede borrar lo procesado sin tocar los datos de Luis Alberto.
+
+Un archivo inválido se registra en CloudWatch y la función termina sin error, para que Lambda no lo reintente en bucle. Solo los errores transitorios de S3 se reintentan, y una sola vez. Las llaves de salida se derivan de la original, así que un evento duplicado sobrescribe en lugar de duplicar. Empaquetamos Pillow en un zip con wheels `manylinux` para Linux x86_64 en lugar de una Layer o una imagen de contenedor: no requiere Docker ni ECR, es un solo artefacto y se prueba en local antes de subirlo, porque la arquitectura y la versión de Python coinciden con las de la Lambda.
