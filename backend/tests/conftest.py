@@ -1,8 +1,10 @@
 import sqlite3
 from contextlib import contextmanager
 import pytest
+from argon2 import PasswordHasher
 from fastapi.testclient import TestClient
 
+import auth
 import database
 from main import app
 
@@ -117,6 +119,27 @@ def test_db(monkeypatch):
     conn.close()
 
 
+TEST_JWT_KEY = "llave-de-prueba-" + "x" * 48
+
+
 @pytest.fixture
-def client(test_db):
+def client(test_db, monkeypatch):
+    # Llave JWT local: app_secrets la toma de la variable y no llama a Secrets Manager.
+    monkeypatch.setenv("JWT_SIGNING_KEY", TEST_JWT_KEY)
+    monkeypatch.setenv("JWT_ALGORITHM", "HS256")
+    # Argon2id con parámetros mínimos para que las pruebas no tarden; producción usa los de argon2-cffi.
+    monkeypatch.setattr(auth, "_hasher", PasswordHasher(time_cost=1, memory_cost=8, parallelism=1))
     return TestClient(app)
+
+
+@pytest.fixture
+def register(client):
+    """Registra un usuario y devuelve (user_id, headers con su token Bearer)."""
+
+    def _register(username: str, email: str, password: str = "contrasena-segura"):
+        response = client.post("/auth/register", json={"username": username, "email": email, "password": password})
+        assert response.status_code == 201, response.text
+        body = response.json()
+        return body["user"]["id"], {"Authorization": f"Bearer {body['access_token']}"}
+
+    return _register

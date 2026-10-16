@@ -12,11 +12,9 @@ def test_feed_empty(client):
     assert data["total_pages"] == 1
 
 
-def test_create_pin_and_paginated_feed(client):
+def test_create_pin_and_paginated_feed(client, register):
     # 1. Crear usuario autor
-    u_res = client.post("/users", json={"username": "alice", "email": "alice@example.com"})
-    assert u_res.status_code == 201
-    user_id = u_res.json()["id"]
+    user_id, headers = register("alice", "alice@example.com")
 
     # 2. Crear pines en distintas categorías
     for i in range(5):
@@ -24,12 +22,12 @@ def test_create_pin_and_paginated_feed(client):
         p_res = client.post(
             "/pins",
             json={
-                "user_id": user_id,
                 "title": f"Pin {i}",
                 "description": f"Desc {i}",
                 "category": category,
                 "object_key": f"originals/{uuid4()}/img.jpg",
             },
+            headers=headers,
         )
         assert p_res.status_code == 201
         assert p_res.json()["likes_count"] == 0
@@ -58,7 +56,7 @@ def test_create_pin_and_paginated_feed(client):
         assert pin["category"] == "design"
 
 
-def test_like_pin_increments_count_and_creates_notification(client, monkeypatch):
+def test_like_pin_increments_count_and_creates_notification(client, register, monkeypatch):
     # Capturar eventos SNS
     published_events = []
 
@@ -69,25 +67,24 @@ def test_like_pin_increments_count_and_creates_notification(client, monkeypatch)
     monkeypatch.setattr(sns, "publish_event", mock_publish_event)
 
     # 1. Crear usuario dueño del pin
-    u_res = client.post("/users", json={"username": "bob", "email": "bob@example.com"})
-    user_id = u_res.json()["id"]
+    user_id, headers = register("bob", "bob@example.com")
 
     # 2. Crear el pin
     p_res = client.post(
         "/pins",
         json={
-            "user_id": user_id,
             "title": "Inspiración Minimalista",
             "description": "Un buen diseño",
             "category": "arquitectura",
             "object_key": "originals/mock/img.jpg",
         },
+        headers=headers,
     )
     pin_id = p_res.json()["id"]
     assert p_res.json()["likes_count"] == 0
 
     # 3. Dar like al pin (sin registrar usuario que da like, solo incrementa contador)
-    like_res1 = client.post(f"/pins/{pin_id}/like")
+    like_res1 = client.post(f"/pins/{pin_id}/like", headers=headers)
     assert like_res1.status_code == 200
     data1 = like_res1.json()
     assert data1["pin_id"] == pin_id
@@ -95,7 +92,7 @@ def test_like_pin_increments_count_and_creates_notification(client, monkeypatch)
     assert "Like registrado" in data1["message"]
 
     # Segundo like
-    like_res2 = client.post(f"/pins/{pin_id}/like")
+    like_res2 = client.post(f"/pins/{pin_id}/like", headers=headers)
     assert like_res2.status_code == 200
     data2 = like_res2.json()
     assert data2["likes_count"] == 2
@@ -106,7 +103,7 @@ def test_like_pin_increments_count_and_creates_notification(client, monkeypatch)
     assert pin_res.json()["likes_count"] == 2
 
     # 4. Verificar que se creó notificación para el dueño del pin
-    notif_res = client.get(f"/notifications?user_id={user_id}")
+    notif_res = client.get("/notifications", headers=headers)
     assert notif_res.status_code == 200
     notifs = notif_res.json()
     assert len(notifs) == 2
@@ -121,7 +118,8 @@ def test_like_pin_increments_count_and_creates_notification(client, monkeypatch)
     assert like_events[0]["payload"]["user_id"] == user_id
 
 
-def test_like_non_existent_pin_returns_404(client):
-    res = client.post("/pins/non-existent-uuid/like")
+def test_like_non_existent_pin_returns_404(client, register):
+    _, headers = register("carol", "carol@example.com")
+    res = client.post("/pins/non-existent-uuid/like", headers=headers)
     assert res.status_code == 404
     assert res.json()["detail"] == "Pin no encontrado."

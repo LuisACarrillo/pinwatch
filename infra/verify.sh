@@ -58,6 +58,43 @@ else
     log "AVISO  El security group tiene $open regla(s) de entrada (¿EC2_ACCESS=ssh?)"
 fi
 
+# Esquema de la RDS: el bastión lee el secreto con su rol y corre psql ahí mismo, así la
+# contraseña nunca sale de él. Aquí solo regresan líneas "pinwatch-schema <tabla>.<columna>".
+REQUIRED_COLUMNS="users.id pins.object_key pins.likes_count pins.status pins.processed_key pins.thumbnail_key
+boards.id board_pins.pin_id notifications.id"
+
+check_schema() {
+  if [[ "${id:-None}" == "None" ]] || ! command -v session-manager-plugin >/dev/null 2>&1; then
+    fail "No se pudo revisar el esquema: hace falta el bastión en running y session-manager-plugin"
+    return
+  fi
+  local remote out found missing="" column
+  remote="$(base64 <<EOF | tr -d '\n'
+set -eu
+secret="\$(aws secretsmanager get-secret-value --region $AWS_REGION --secret-id '$APP_SECRET_NAME' --query SecretString --output text)"
+eval "\$(python3 -c 'import json, shlex, sys
+s = json.load(sys.stdin)
+for var, key in (("PGHOST", "db_host"), ("PGPORT", "db_port"), ("PGDATABASE", "db_name"), ("PGUSER", "db_username"), ("PGPASSWORD", "db_password")):
+    print("export %s=%s" % (var, shlex.quote(str(s.get(key, "")))))' <<<"\$secret")"
+psql -At -c "SELECT 'pinwatch-schema ' || table_name || '.' || column_name FROM information_schema.columns WHERE table_schema = 'public';"
+EOF
+)"
+  out="$(ssm_run "$id" "bash -c \"echo $remote | base64 -d | bash\"" 20)"
+  found="$(grep -o 'pinwatch-schema [a-z_]*\.[a-z_]*' <<<"$out" | cut -d' ' -f2 || true)"
+  if [[ -z "$found" ]]; then
+    fail "No se pudo leer el esquema desde el bastión -> $(grep . <<<"$out" | grep -v -i password | tail -n 1)"
+    return
+  fi
+  for column in $REQUIRED_COLUMNS; do
+    grep -qx "$column" <<<"$found" || missing+=" $column"
+  done
+  if [[ -z "$missing" ]]; then
+    pass "Esquema completo en la RDS ($(wc -l <<<"$found" | tr -d ' ') columnas; pins con status, processed_key y thumbnail_key)"
+  else
+    fail "Faltan columnas en la RDS:$missing (aplica el esquema con: bash infra/rds.sh up)"
+  fi
+}
+
 # 5. Base de datos RDS PostgreSQL disponible y conectada en Secrets Manager
 rds_status="$(aws rds describe-db-instances --db-instance-identifier "pinwatch-db" \
   --query 'DBInstances[0].[DBInstanceStatus, Endpoint.Address]' --output text 2>/dev/null || true)"
@@ -65,6 +102,7 @@ if [[ -n "$rds_status" ]]; then
   read -r rds_st rds_ep <<<"$rds_status"
   if [[ "$rds_st" == "available" ]]; then
     pass "RDS pinwatch-db en available: $rds_ep"
+    check_schema
   else
     fail "RDS pinwatch-db en estado '$rds_st' (no available)"
   fi
