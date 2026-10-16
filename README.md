@@ -14,12 +14,23 @@ El repositorio separa la API, la interfaz y los pipelines. El frontend se gestio
 pinwatch/
 ├── backend/                  # API FastAPI, empaquetable en AWS Lambda
 │   ├── main.py               # App, GET /health, POST /pins/presign-url y handler de Mangum
+│   ├── app_secrets.py        # Configuración leída de AWS Secrets Manager
 │   └── requirements.txt
 ├── frontend/                 # Aplicación React con Vite
 │   └── src/
 │       ├── components/       # Componentes de interfaz
 │       └── services/         # Cliente de la API
-├── infra/                    # Bucket de originales y su CORS
+├── infra/                    # Infraestructura como código y automatización
+│   ├── setup_originals_bucket.py # Bucket S3 de originales y CORS
+│   ├── secrets.sh            # Secreto en Secrets Manager (JWT y BD)
+│   ├── ec2.sh                # Bastión EC2 y Session Manager
+│   ├── rds.sh                # Amazon RDS PostgreSQL y migración de esquema
+│   ├── schema.sql            # Esquema relacional (users, pins, boards, board_pins)
+│   ├── up.sh                 # Orquestador de infraestructura
+│   ├── verify.sh             # Comprobaciones end-to-end
+│   └── teardown.sh           # Limpieza de recursos
+├── Makefile                  # Comandos rápidos: make up, make down, make status
+├── start_backend.sh          # Script orquestador del backend e infra
 ├── .github/workflows/        # Pipelines de integración continua
 ├── package.json              # Scripts del workspace pnpm
 └── pnpm-workspace.yaml
@@ -29,57 +40,60 @@ pinwatch/
 | --- | --- |
 | `backend/` | API HTTP con FastAPI. `POST /pins/presign-url` firma la subida a S3. `handler` en `main.py` adapta la app a AWS Lambda mediante Mangum. |
 | `frontend/` | Interfaz React. El formulario de un pin pide la URL firmada y sube la imagen directo al bucket. |
-| `infra/` | Script que crea el bucket de originales y el CORS que permite esa subida desde el navegador. |
+| `infra/` | Scripts de infraestructura (S3, Secrets Manager, Bastión EC2, RDS PostgreSQL y esquema SQL). |
+| `Makefile` / `start_backend.sh` | Levanta toda la infraestructura en orden y arranca la API del backend. |
 | `.github/workflows/` | Definiciones de CI. El directorio queda reservado para los pipelines del equipo. |
 
 ## Requisitos
 
-- Python 3.10 o superior
+- Python 3.10 o superior (`python3-venv`, `python3-pip`)
 - Node.js 22 o superior
 - pnpm 12 (`corepack enable` y `corepack prepare pnpm@12.11.2 --activate`)
-- AWS CLI. `aws configure` tiene que hacerse en el mismo entorno donde corre la API
+- AWS CLI v2 (`aws configure` configurado en `us-east-1` en el mismo entorno donde corre la API)
+- `make` (opcional, para usar `make up`)
 
-## Backend
-
-La API firma la subida con las credenciales de AWS del proceso que la ejecuta. Si `aws configure` se hizo en Ubuntu (WSL), la API también se levanta ahí. El `.venv` de Windows no se reutiliza dentro de Ubuntu.
-
-En Ubuntu, desde la raíz del repositorio (si el repo está en el disco de Windows, la ruta empieza por `/mnt/c/`):
+En **Ubuntu / WSL**, instala las dependencias del sistema necesarias:
 
 ```bash
 sudo apt-get update
-sudo apt-get install -y python3-venv python3-pip
-python3 -m venv ~/pinwatch-venv
-~/pinwatch-venv/bin/pip install -r backend/requirements.txt
-aws configure
-python3 infra/setup_originals_bucket.py
-~/pinwatch-venv/bin/uvicorn main:app --app-dir backend --host 127.0.0.1 --port 8000
+sudo apt-get install -y python3-venv python3-pip make curl openssl
 ```
 
-El script del bucket se corre una vez. Crea `pinwatch-originals-<cuenta>`, o el nombre que tenga `ORIGINALS_BUCKET`, y deja el prefijo `originals/` listo para la subida directa.
+> **Nota en WSL:** Si el repositorio está en el disco de Windows, la ruta en la terminal de Ubuntu empieza por `/mnt/c/`. Los scripts de bash y la API deben ejecutarse dentro de Ubuntu con las credenciales de AWS configuradas en esa sesión.
 
-Si `aws configure` se ejecutó en una sesión con `$HOME` vacío, las credenciales quedaron en `/.aws`. Arranca uvicorn así:
+
+## Backend
+
+La API firma la subida con las credenciales de AWS del proceso que la ejecuta y se conecta a la infraestructura en la nube (S3, Secrets Manager, RDS).
+
+### Levantar todo el Backend con un solo comando
+
+Con las credenciales de AWS configuradas en tu terminal, levanta la infraestructura completa (S3, Secrets, EC2 bastión, RDS PostgreSQL, esquema relacional) y arranca la API con:
 
 ```bash
-AWS_SHARED_CREDENTIALS_FILE=/.aws/credentials AWS_CONFIG_FILE=/.aws/config AWS_DEFAULT_REGION=us-east-1 ~/pinwatch-venv/bin/uvicorn main:app --app-dir backend --host 127.0.0.1 --port 8000
+make up
 ```
 
-En Windows, cuando las credenciales están en Windows:
+O directamente ejecutando el script orquestador:
 
-```powershell
-python -m venv .venv
-.venv\Scripts\Activate.ps1
-pip install -r backend/requirements.txt
-aws configure
-python infra/setup_originals_bucket.py
-uvicorn main:app --reload --app-dir backend --port 8000
+```bash
+bash start_backend.sh
 ```
 
-Deja esa terminal abierta.
+Este script ejecuta automáticamente en el orden estricto necesario:
+1. Valida la sesión activa de AWS en `us-east-1`.
+2. `python3 infra/setup_originals_bucket.py`: crea o verifica el bucket S3 `pinwatch-originals-<cuenta>` y aplica su política CORS.
+3. `bash infra/secrets.sh up`: genera y configura el secreto `pinwatch/app` en AWS Secrets Manager con llaves JWT aleatorias.
+4. `bash infra/ec2.sh up`: levanta el bastión EC2 `pinwatch-bastion` (`t3.micro`) con SSM y cliente `psql`.
+5. `bash infra/rds.sh up`: aprovisiona la instancia Amazon RDS PostgreSQL (`pinwatch-db`), DB Subnet Group y Security Group (`pinwatch-db-sg`), actualiza `pinwatch/app` con `db_host`, `db_port`, `db_name`, `db_username`, `db_password`, y aplica `infra/schema.sql` a través del bastión.
+6. Prepara el entorno virtual de Python (`.venv` o `~/pinwatch-venv`), instala las dependencias de `backend/requirements.txt` y levanta el servidor Uvicorn en modo reload.
 
+La API quedará disponible de inmediato:
 - Salud local: [http://localhost:8000/health](http://localhost:8000/health)
 - Documentación interactiva: [http://localhost:8000/docs](http://localhost:8000/docs)
 - Subida: `POST /pins/presign-url` devuelve una URL firmada de `PutObject` hacia `originals/`
 - Handler de Lambda: `main.handler`
+
 
 ## Frontend
 
@@ -102,43 +116,49 @@ pnpm lint
 pnpm preview
 ```
 
-## Infraestructura de Luis Fernando: Secrets Manager y bastión EC2
+## Infraestructura en AWS: S3, Secrets Manager, Bastión EC2 y Amazon RDS
 
-Todo se crea con la AWS CLI desde scripts de bash en `infra/`. Cada script se puede correr varias veces: si el recurso ya existe, lo reusa. `teardown.sh` borra solo lo que crean estos scripts (recursos con las etiquetas `Project=pinwatch` y `Owner=luis-fernando`); no toca el bucket de originales ni la base de datos RDS.
+Todo se crea con la AWS CLI y scripts de bash en `infra/`. Cada script es idempotente y se puede correr varias veces: si el recurso ya existe, lo reutiliza. `teardown.sh` borra lo creado por los scripts (con confirmación).
 
 | Servicio | Recurso | Para qué |
 | --- | --- | --- |
-| Secrets Manager | Secreto `pinwatch/app` | JSON con la configuración sensible: `jwt_signing_key` y `jwt_algorithm` (los genera `up.sh`) y los datos de la base `db_*` (los agrega quien crea la RDS). Nada de esto vive en el repo. |
+| S3 | `pinwatch-originals-<cuenta>` | Almacenamiento de las imágenes originales subidas directamente desde el navegador vía URLs prefirmadas. |
+| Secrets Manager | Secreto `pinwatch/app` | JSON con la configuración sensible: `jwt_signing_key`, `jwt_algorithm`, `db_host`, `db_port`, `db_name`, `db_username` y `db_password`. Nada de esto vive en el repo. |
 | EC2 | Instancia `pinwatch-bastion` (`t3.micro`, Amazon Linux 2023, `LabInstanceProfile`, cliente `psql` 16) | Bastión para entrar a la RDS privada: consola, `psql` y túnel para migraciones. El flujo de la aplicación no depende de que esté prendida. |
 | EC2 | Security group `pinwatch-bastion-sg` | Sin reglas de entrada. Se entra por Session Manager, no por SSH. |
+| RDS | Instancia `pinwatch-db` (`db.t3.micro`, PostgreSQL 16) | Base de datos relacional para usuarios, pines, tableros y asociaciones. |
+| EC2 / RDS | Security group `pinwatch-db-sg` | Acepta conexiones en el puerto 5432 únicamente desde `pinwatch-bastion-sg`. |
+| RDS | DB Subnet Group `pinwatch-db-subnet-group` | Agrupa subredes de la VPC en múltiples zonas de disponibilidad para alta compatibilidad en RDS. |
 
 Costo: la instancia cobra solo mientras está prendida (~USD 0.015/h con su IP pública); el disco de 8 GB y el secreto cobran aunque esté apagada (~USD 0.64 y 0.40 al mes). Con `teardown.sh` el costo queda en cero.
 
 ### Requisitos previos
 
 - Learner Lab iniciado (indicador en verde).
-- Las credenciales de **AWS Details** copiadas en `~/.aws/credentials` de Ubuntu (WSL): `aws_access_key_id`, `aws_secret_access_key` y `aws_session_token`.
+- Las credenciales de **AWS Details** copiadas en `~/.aws/credentials`: `aws_access_key_id`, `aws_secret_access_key` y `aws_session_token`.
 - Región `us-east-1` (`aws configure set region us-east-1`). Los scripts se niegan a correr en otra.
-- En Ubuntu: AWS CLI v2, `python3`, `openssl`, `curl` y [session-manager-plugin](https://docs.aws.amazon.com/systems-manager/latest/userguide/install-plugin-debian-and-ubuntu.html):
+- En Ubuntu / macOS: AWS CLI v2, `python3`, `openssl`, `curl` y [session-manager-plugin](https://docs.aws.amazon.com/systems-manager/latest/userguide/install-plugin-debian-and-ubuntu.html):
 
 ```bash
 curl -fsSLo /tmp/smp.deb https://s3.amazonaws.com/session-manager-downloads/plugin/latest/ubuntu_64bit/session-manager-plugin.deb
 sudo dpkg -i /tmp/smp.deb
 ```
 
-### Levantar, probar y bajar
-
-En Ubuntu, desde la raíz del repositorio:
+### Comandos de gestión de infraestructura
 
 ```bash
-bash infra/check_lab.sh          # 1. el lab permite lo necesario (no deja nada creado)
-bash infra/up.sh                 # 2. crea o reusa el secreto y el bastión (~3 min la primera vez)
-bash infra/verify.sh             # 3. comprueba que todo funciona
-bash infra/teardown.sh --status  #    muestra qué existe, sin borrar
-bash infra/teardown.sh           # 4. borra todo, pide confirmación (--yes para no preguntar)
+make up                 # Levanta toda la infraestructura en orden y arranca la API
+make status             # Muestra qué existe en Secrets Manager, EC2 bastión y RDS
+make verify             # Comprueba que la infraestructura funciona de punta a punta
+make down               # Borra los recursos creados (pide confirmación)
 ```
 
-Cada servicio también se maneja por separado: `bash infra/secrets.sh up|status|down` y `bash infra/ec2.sh up|status|down` (`down` acepta `--yes`).
+Cada script también se puede ejecutar y gestionar de forma individual:
+- `bash infra/secrets.sh up|status|down`
+- `bash infra/ec2.sh up|status|down`
+- `bash infra/rds.sh up|status|down` (`down` acepta `--yes`)
+- `bash infra/teardown.sh [--yes | --status]`
+
 
 ### Entrar al bastión y a la base
 

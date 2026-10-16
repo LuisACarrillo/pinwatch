@@ -20,16 +20,20 @@ ASSUME_YES="${ASSUME_YES:-0}"
 
 aws_session
 
+bash "$INFRA_DIR/rds.sh" status
 bash "$INFRA_DIR/ec2.sh" status
 bash "$INFRA_DIR/secrets.sh" status
 [[ "$MODE" == "status" ]] && exit 0
 
 confirm "Se borrará todo lo anterior en la cuenta $ACCOUNT_ID. ¿Continuar?" || die "Cancelado."
 
-# Orden: primero lo que depende de otros recursos (instancia, luego su security group), al final los secretos.
-log "1/2 Bastión EC2"
+# Orden: primero RDS y bastión (con sus security groups), al final los secretos.
+log "1/3 Base de datos Amazon RDS"
+bash "$INFRA_DIR/rds.sh" down --yes
+log "2/3 Bastión EC2"
 bash "$INFRA_DIR/ec2.sh" down --yes
-log "2/2 Secrets Manager"
+log "3/3 Secrets Manager"
 bash "$INFRA_DIR/secrets.sh" down --yes
 
 log "Teardown terminado."
+
