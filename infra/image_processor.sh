@@ -81,8 +81,11 @@ build_zip() {
   mkdir -p "$build/image_processor"
   cp "$SOURCE_DIR"/*.py "$build/image_processor/"
 
-  # Si la versión local coincide con el runtime, se prueba el paquete antes de subirlo.
-  if [[ "$(python3 -c 'import sys; print(f"{sys.version_info[0]}.{sys.version_info[1]}")')" == "$PYTHON_VERSION" ]]; then
+  # Si esto es Linux y la versión local coincide con el runtime, se prueba el paquete antes de
+  # subirlo. En macOS no: el zip trae el Pillow de Linux y no se puede importar ahí.
+  if [[ "$(uname -s)" != "Linux" ]]; then
+    log "Prueba local del zip omitida: el Pillow del paquete es para Linux y esto es $(uname -s)"
+  elif [[ "$(python3 -c 'import sys; print(f"{sys.version_info[0]}.{sys.version_info[1]}")')" == "$PYTHON_VERSION" ]]; then
     # boto3 no viaja en el zip (lo trae el runtime), así que se prueba processing, no handler.
     (cd "$build" && python3 -I -c '
 import sys; sys.path.insert(0, ".")
