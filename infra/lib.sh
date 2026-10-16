@@ -66,10 +66,24 @@ lab_role_arn() {
 # El plugin necesita stdin abierto mientras corre; `sleep` lo mantiene esos segundos.
 ssm_run() {
   local id="$1" command="$2" hold="${3:-15}"
-  sleep "$hold" | timeout 60 aws ssm start-session --target "$id" \
-    --document-name AWS-StartNonInteractiveCommand \
-    --parameters "{\"command\":[\"$command\"]}" 2>&1 | tr -d '\r' || true
+  local params
+  params="$(python3 -c 'import json, sys; print(json.dumps({"command": [sys.argv[1]]}))' "$command")"
+  if command -v timeout >/dev/null 2>&1; then
+    sleep "$hold" | timeout 60 aws ssm start-session --target "$id" \
+      --document-name AWS-StartNonInteractiveCommand \
+      --parameters "$params" 2>&1 | tr -d '\r' || true
+  elif command -v gtimeout >/dev/null 2>&1; then
+    sleep "$hold" | gtimeout 60 aws ssm start-session --target "$id" \
+      --document-name AWS-StartNonInteractiveCommand \
+      --parameters "$params" 2>&1 | tr -d '\r' || true
+  else
+    sleep "$hold" | aws ssm start-session --target "$id" \
+      --document-name AWS-StartNonInteractiveCommand \
+      --parameters "$params" 2>&1 | tr -d '\r' || true
+  fi
 }
+
+
 
 # Etiquetas que identifican los recursos de esta parte; teardown.sh solo borra lo que las tenga.
 tag_spec() {

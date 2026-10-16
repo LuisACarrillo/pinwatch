@@ -129,23 +129,32 @@ wait_ssm_online() {
 
 # Online en SSM no significa listo: el user-data puede seguir instalando psql.
 wait_bootstrap() {
-  local id="$1" attempt status
-  log "Esperando a que termine el arranque (cloud-init) de $id (hasta 5 min)"
-  for attempt in $(seq 1 20); do
-    # Cada consulta tarda ~15 s (lo que ssm_run mantiene abierta la sesión).
-    status="$(ssm_run "$id" "cloud-init status" | grep -o 'status: [a-z]*' || true)"
+  local id="$1" attempt status out
+  log "Esperando a que termine el arranque (cloud-init e instalación de psql) de $id"
+  for attempt in $(seq 1 30); do
+    # 1. Si psql ya responde, está listo de inmediato
+    out="$(ssm_run "$id" "psql --version" 10 2>/dev/null || true)"
+    if grep -q "psql (PostgreSQL)" <<<"$out"; then
+      log "Arranque terminado; psql instalado ($(grep -o 'psql (PostgreSQL) [0-9.]*' <<<"$out"))."
+      return 0
+    fi
+
+    # 2. Consultar estado de cloud-init
+    status="$(ssm_run "$id" "cloud-init status" 10 2>/dev/null | grep -o 'status: [a-z]*' || true)"
     case "$status" in
       "status: done")
-        log "Arranque terminado; psql instalado."
-        return
+        log "Arranque terminado; verificando psql..."
+        return 0
         ;;
       "status: error")
         die "cloud-init terminó con error. Revisa /var/log/cloud-init-output.log en el bastión."
         ;;
     esac
+    sleep 5
   done
-  die "El arranque de $id no terminó en 5 minutos. Revisa /var/log/cloud-init-output.log en el bastión."
+  die "El arranque de $id no terminó en el tiempo esperado. Revisa /var/log/cloud-init-output.log en el bastión."
 }
+
 
 ec2_up() {
   [[ "$ACCESS" == "ssh" ]] || require_cmd session-manager-plugin

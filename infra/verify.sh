@@ -58,7 +58,31 @@ else
     log "AVISO  El security group tiene $open regla(s) de entrada (¿EC2_ACCESS=ssh?)"
 fi
 
-# 5. Flujo 2 de punta a punta: una imagen válida y un texto disfrazado de .jpg en originals/.
+# 5. Base de datos RDS PostgreSQL disponible y conectada en Secrets Manager
+rds_status="$(aws rds describe-db-instances --db-instance-identifier "pinwatch-db" \
+  --query 'DBInstances[0].[DBInstanceStatus, Endpoint.Address]' --output text 2>/dev/null || true)"
+if [[ -n "$rds_status" ]]; then
+  read -r rds_st rds_ep <<<"$rds_status"
+  if [[ "$rds_st" == "available" ]]; then
+    pass "RDS pinwatch-db en available: $rds_ep"
+  else
+    fail "RDS pinwatch-db en estado '$rds_st' (no available)"
+  fi
+else
+  log "AVISO  RDS pinwatch-db no encontrada (ejecuta 'bash infra/rds.sh up' para levantarla)"
+fi
+
+# 6. Tópico Amazon SNS existente
+sns_arn="$(aws sns list-topics \
+  --query "Topics[?ends_with(TopicArn, ':pinwatch-events')].TopicArn" \
+  --output text 2>/dev/null | grep -v '^None$' || true)"
+if [[ -n "$sns_arn" ]]; then
+  pass "Tópico Amazon SNS pinwatch-events existe: $sns_arn"
+else
+  log "AVISO  Tópico SNS pinwatch-events no encontrado (ejecuta 'bash infra/sns.sh up' para crearlo)"
+fi
+
+# 7. Flujo 2 de punta a punta: una imagen válida y un texto disfrazado de .jpg en originals/.
 ORIGINALS_BUCKET="${ORIGINALS_BUCKET:-pinwatch-originals-$ACCOUNT_ID}"
 PROCESSED_BUCKET="${PROCESSED_BUCKET:-pinwatch-processed-$ACCOUNT_ID}"
 LOG_GROUP="/aws/lambda/pinwatch-image-processor"
