@@ -3,7 +3,7 @@ import os
 import re
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
 from uuid import uuid4
 
 import boto3
@@ -111,6 +111,10 @@ class PinResponse(BaseModel):
     object_key: str
     likes_count: int = 0
     created_at: datetime
+    # Flujo 2: pending hasta que la Lambda termina; las llaves son del bucket processed.
+    status: Literal["pending", "processed", "rejected"] = "pending"
+    processed_key: str | None = None
+    thumbnail_key: str | None = None
 
 
 class PaginatedFeed(BaseModel):
@@ -304,7 +308,8 @@ def create_pin(pin: PinCreate) -> dict[str, Any]:
                     """
                     INSERT INTO pins (id, user_id, title, description, category, object_key, likes_count, created_at)
                     VALUES (%s, %s, %s, %s, %s, %s, 0, %s)
-                    RETURNING id, user_id, title, description, category, object_key, likes_count, created_at;
+                    RETURNING id, user_id, title, description, category, object_key, likes_count, created_at,
+                              status, processed_key, thumbnail_key;
                     """,
                     (pin_id, pin.user_id, pin.title, pin.description, pin.category, pin.object_key, now),
                 )
@@ -347,7 +352,8 @@ def get_feed(
 
                     cur.execute(
                         """
-                        SELECT id, user_id, title, description, category, object_key, likes_count, created_at
+                        SELECT id, user_id, title, description, category, object_key, likes_count, created_at,
+                               status, processed_key, thumbnail_key
                         FROM pins
                         WHERE category = %s
                         ORDER BY created_at DESC
@@ -361,7 +367,8 @@ def get_feed(
 
                     cur.execute(
                         """
-                        SELECT id, user_id, title, description, category, object_key, likes_count, created_at
+                        SELECT id, user_id, title, description, category, object_key, likes_count, created_at,
+                               status, processed_key, thumbnail_key
                         FROM pins
                         ORDER BY created_at DESC
                         LIMIT %s OFFSET %s;
@@ -394,7 +401,8 @@ def get_pin(pin_id: str) -> dict[str, Any]:
             with conn.cursor() as cur:
                 cur.execute(
                     """
-                    SELECT id, user_id, title, description, category, object_key, likes_count, created_at
+                    SELECT id, user_id, title, description, category, object_key, likes_count, created_at,
+                           status, processed_key, thumbnail_key
                     FROM pins
                     WHERE id = %s;
                     """,
@@ -586,7 +594,8 @@ def get_board(board_id: str) -> dict[str, Any]:
 
                 cur.execute(
                     """
-                    SELECT p.id, p.user_id, p.title, p.description, p.category, p.object_key, p.likes_count, p.created_at
+                    SELECT p.id, p.user_id, p.title, p.description, p.category, p.object_key, p.likes_count, p.created_at,
+                           p.status, p.processed_key, p.thumbnail_key
                     FROM pins p
                     JOIN board_pins bp ON p.id = bp.pin_id
                     WHERE bp.board_id = %s
