@@ -7,11 +7,14 @@ import { categories, noteLook } from "./data/catalog.js";
 import {
   addPinToBoard,
   createBoard as postBoard,
+  deleteBoard as deleteBoardRequest,
   getBoard,
   getBoards,
   getFeed,
+  getPin,
   likePin,
   removePinFromBoard,
+  updateBoard,
 } from "./services/api.js";
 import AuthView from "./views/AuthView.jsx";
 import BoardView from "./views/BoardView.jsx";
@@ -240,6 +243,30 @@ export default function App() {
   }, [user]);
 
   useEffect(() => {
+    if (screen.name !== "pin" || !screen.id) return undefined;
+    let active = true;
+    getPin(screen.id)
+      .then((item) => {
+        if (!active) return;
+        setPins((current) => {
+          const pin = presentPin(item);
+          const index = current.findIndex((entry) => entry.id === pin.id);
+          if (index === -1) return [...current, pin];
+          const next = [...current];
+          next[index] = keepPreview(current[index], pin);
+          return next;
+        });
+      })
+      .catch((error) => {
+        if (!active || error.status === 401) return;
+        setActionError(error.message);
+      });
+    return () => {
+      active = false;
+    };
+  }, [screen]);
+
+  useEffect(() => {
     if (!openingId) return undefined;
     const timer = window.setTimeout(() => finishOpen(openingId), 1800);
     return () => window.clearTimeout(timer);
@@ -350,6 +377,32 @@ export default function App() {
     setScreen({ name: "board", id: board.id });
   }
 
+  async function renameBoard({ name, description }) {
+    if (screen.name !== "board") return;
+    const updated = await updateBoard(screen.id, { name, description });
+    setBoards((current) =>
+      current.map((board) =>
+        board.id === updated.id
+          ? { ...board, name: updated.name, description: updated.description ?? "" }
+          : board,
+      ),
+    );
+    setActionError("");
+    setModal(null);
+  }
+
+  async function removeBoard() {
+    if (screen.name !== "board") return;
+    setActionError("");
+    try {
+      await deleteBoardRequest(screen.id);
+      setBoards((current) => current.filter((board) => board.id !== screen.id));
+      openProfile();
+    } catch (error) {
+      if (error.status !== 401) setActionError(error.message);
+    }
+  }
+
   function signOut() {
     logout();
     setBoards([]);
@@ -431,6 +484,10 @@ export default function App() {
           loading={boardLoading}
           error={actionError}
           onBack={openProfile}
+          onEdit={() => {
+            if (requireUser()) setModal("edit-board");
+          }}
+          onDelete={removeBoard}
           fallingId={openingId}
           onOpen={beginOpen}
           onFallen={finishOpen}
@@ -443,8 +500,12 @@ export default function App() {
           onCreate={createPin}
         />
       ) : null}
-      {modal === "board" ? (
-        <CreateBoardModal onClose={() => setModal(null)} onCreate={createBoard} />
+      {modal === "board" || modal === "edit-board" ? (
+        <CreateBoardModal
+          board={modal === "edit-board" ? selectedBoard : null}
+          onClose={() => setModal(null)}
+          onCreate={modal === "edit-board" ? renameBoard : createBoard}
+        />
       ) : null}
     </div>
   );

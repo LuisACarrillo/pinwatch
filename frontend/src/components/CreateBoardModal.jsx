@@ -1,8 +1,9 @@
 import { useEffect, useState } from "react";
 
-export default function CreateBoardModal({ onClose, onCreate }) {
-  const [name, setName] = useState("");
-  const [description, setDescription] = useState("");
+export default function CreateBoardModal({ onClose, onCreate, board = null }) {
+  const editing = Boolean(board);
+  const [name, setName] = useState(board?.name ?? "");
+  const [description, setDescription] = useState(board?.description ?? "");
   const [error, setError] = useState("");
   const [submitting, setSubmitting] = useState(false);
 
@@ -41,7 +42,7 @@ export default function CreateBoardModal({ onClose, onCreate }) {
         onClick={(event) => event.stopPropagation()}
         onSubmit={onSubmit}
       >
-        <h2 id="create-board-title">Nueva colección</h2>
+        <h2 id="create-board-title">{editing ? "Editar colección" : "Nueva colección"}</h2>
         <label className="field">
           Nombre
           <input
@@ -67,7 +68,7 @@ export default function CreateBoardModal({ onClose, onCreate }) {
             Cancelar
           </button>
           <button type="submit" className="is-current" disabled={submitting}>
-            {submitting ? "Creando…" : "Crear"}
+            {editing ? (submitting ? "Guardando…" : "Guardar") : submitting ? "Creando…" : "Crear"}
           </button>
         </div>
       </form>

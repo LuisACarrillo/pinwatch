@@ -605,6 +605,19 @@ h3 {
   margin: 6px 0 0;
 }
 
+.board-actions {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px 16px;
+  margin-top: 10px;
+}
+
+.board-actions .text-action,
+.board-actions .quiet {
+  margin: 0;
+}
+
 .text-action {
   margin-bottom: 14px;
   text-decoration: underline;

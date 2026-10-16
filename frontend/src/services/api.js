@@ -161,6 +161,22 @@ export function getBoard(boardId) {
   return request(`/boards/${boardId}`);
 }
 
+export function getPin(pinId) {
+  return request(`/pins/${pinId}`);
+}
+
+export function updateBoard(boardId, { name, description }) {
+  return request(`/boards/${boardId}`, {
+    method: "PUT",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ name, description }),
+  });
+}
+
+export function deleteBoard(boardId) {
+  return request(`/boards/${boardId}`, { method: "DELETE" });
+}
+
 export function likePin(pinId) {
   return request(`/pins/${pinId}/like`, { method: "POST" });
 }
