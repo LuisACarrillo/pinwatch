@@ -13,6 +13,8 @@ export default function ExploreView({
   onOpen,
   onFallen,
   onPinned,
+  loading = false,
+  error = "",
 }) {
   const needle = query.trim().toLowerCase();
   const visible = pins.filter((pin) => {
@@ -33,15 +35,19 @@ export default function ExploreView({
         onQuery={onQuery}
         onCategory={onCategory}
       />
-      <PinGrid
-        pins={visible}
-        fallingId={fallingId}
-        pinningId={pinningId}
-        onOpen={onOpen}
-        onFallen={onFallen}
-        onPinned={onPinned}
-        empty="Nada coincide con esa búsqueda."
-      />
+      {error ? <p className="form-error">{error}</p> : null}
+      {loading ? <p className="empty">Cargando…</p> : null}
+      {loading ? null : (
+        <PinGrid
+          pins={visible}
+          fallingId={fallingId}
+          pinningId={pinningId}
+          onOpen={onOpen}
+          onFallen={onFallen}
+          onPinned={onPinned}
+          empty={pins.length === 0 ? "Todavía no hay pines." : "Nada coincide con esa búsqueda."}
+        />
+      )}
     </>
   );
 }

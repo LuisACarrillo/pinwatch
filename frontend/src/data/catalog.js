@@ -114,6 +114,14 @@ export const initialBoards = [
   },
 ];
 
+export function noteLook(id) {
+  let hash = 0;
+  for (let index = 0; index < id.length; index += 1) {
+    hash = (hash + id.charCodeAt(index)) >>> 0;
+  }
+  return noteLooks[hash % noteLooks.length];
+}
+
 export const noteLooks = [
   { paper: "#fff8e8", sky: "#3d342c", ground: "#c4845a", split: "40%", tall: false, rot: "-0.6deg" },
   { paper: "#fff3c4", sky: "#f3d7a4", ground: "#c4623a", split: "55%", tall: true, rot: "0.5deg" },

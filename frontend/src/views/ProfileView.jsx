@@ -1,11 +1,15 @@
-export default function ProfileView({ user, boards, onOpen, onCreate }) {
+export default function ProfileView({ user, boards, loading = false, error = "", onOpen, onCreate }) {
   return (
     <div className="page">
       <div className="page-head">
         <h2>{user ? `Tableros de ${user.username}` : "Tus tableros"}</h2>
       </div>
+      {error ? <p className="form-error">{error}</p> : null}
+      {loading ? <p className="empty">Cargando…</p> : null}
       <div className="notes">
-        {boards.map((board, index) => (
+        {boards.map((board, index) => {
+          const count = board.pinsCount ?? board.pinIds.length;
+          return (
           <button
             key={board.id}
             type="button"
@@ -17,10 +21,11 @@ export default function ProfileView({ user, boards, onOpen, onCreate }) {
             <p className="board-name">{board.name}</p>
             {board.description ? <p className="quiet">{board.description}</p> : null}
             <p className="count">
-              {board.pinIds.length} {board.pinIds.length === 1 ? "pin" : "pines"}
+              {count} {count === 1 ? "pin" : "pines"}
             </p>
           </button>
-        ))}
+          );
+        })}
         <button type="button" className="board-card board-new" onClick={onCreate}>
           <span className="tack" aria-hidden="true" />
           Nueva colección

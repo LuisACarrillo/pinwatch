@@ -18,6 +18,7 @@ export default function PinDetailView({
   onToggle,
   onLike,
   onCreateBoard,
+  error = "",
 }) {
   if (!pin) {
     return (
@@ -48,9 +49,10 @@ export default function PinDetailView({
             onClick={onLike}
           >
             <HeartIcon />
-            <span>Me gusta</span>
+            <span>Me gusta {pin.likesCount ?? 0}</span>
           </button>
         </div>
+        {error ? <p className="form-error">{error}</p> : null}
         <SaveToBoard
           boards={boards}
           pinId={pin.id}

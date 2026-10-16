@@ -3,8 +3,16 @@ import { useAuth } from "./auth/AuthContext.jsx";
 import CreateBoardModal from "./components/CreateBoardModal.jsx";
 import CreatePinModal from "./components/CreatePinModal.jsx";
 import Masthead from "./components/Masthead.jsx";
-import { categories, initialBoards, initialPins, noteLooks } from "./data/catalog.js";
-import { createBoard as postBoard } from "./services/api.js";
+import { categories, noteLook } from "./data/catalog.js";
+import {
+  addPinToBoard,
+  createBoard as postBoard,
+  getBoard,
+  getBoards,
+  getFeed,
+  likePin,
+  removePinFromBoard,
+} from "./services/api.js";
 import AuthView from "./views/AuthView.jsx";
 import BoardView from "./views/BoardView.jsx";
 import ExploreView from "./views/ExploreView.jsx";
@@ -12,10 +20,38 @@ import NotificationsView from "./views/NotificationsView.jsx";
 import PinDetailView from "./views/PinDetailView.jsx";
 import ProfileView from "./views/ProfileView.jsx";
 
+function presentPin(pin, imageUrl) {
+  return {
+    ...noteLook(pin.id),
+    id: pin.id,
+    title: pin.title,
+    description: pin.description ?? "",
+    category: pin.category,
+    likesCount: pin.likes_count ?? pin.likesCount ?? 0,
+    objectKey: pin.object_key ?? pin.objectKey,
+    imageUrl,
+  };
+}
+
+function keepPreview(previous, pin) {
+  return previous?.imageUrl && !pin.imageUrl ? { ...pin, imageUrl: previous.imageUrl } : pin;
+}
+
+function presentBoard(detail) {
+  const saved = detail.pins ?? [];
+  return {
+    id: detail.id,
+    name: detail.name,
+    description: detail.description ?? "",
+    pinIds: saved.map((pin) => pin.id),
+    pinsCount: Array.isArray(detail.pins) ? saved.length : (detail.pins_count ?? 0),
+  };
+}
+
 export default function App() {
   const { user, status, loginRequired, acknowledgeLogin, logout } = useAuth();
-  const [pins, setPins] = useState(initialPins);
-  const [boards, setBoards] = useState(initialBoards);
+  const [pins, setPins] = useState([]);
+  const [boards, setBoards] = useState([]);
   const [screen, setScreen] = useState({ name: "explore" });
   const [query, setQuery] = useState("");
   const [category, setCategory] = useState("Todas");
@@ -24,6 +60,12 @@ export default function App() {
   const [pinningId, setPinningId] = useState(null);
   const [arriving, setArriving] = useState(false);
   const [likedIds, setLikedIds] = useState([]);
+  const [feedLoading, setFeedLoading] = useState(true);
+  const [feedError, setFeedError] = useState("");
+  const [boardsLoading, setBoardsLoading] = useState(false);
+  const [boardsError, setBoardsError] = useState("");
+  const [boardLoading, setBoardLoading] = useState(false);
+  const [actionError, setActionError] = useState("");
   const openingRef = useRef(null);
   const pinningRef = useRef(null);
 
@@ -50,6 +92,7 @@ export default function App() {
     openingRef.current = null;
     setOpeningId(null);
     setArriving(false);
+    setActionError("");
     setScreen({ name: "explore" });
     if (returningId && !reduce) {
       pinningRef.current = returningId;
@@ -61,11 +104,13 @@ export default function App() {
   }
 
   function openProfile() {
+    if (!requireUser()) return;
     openingRef.current = null;
     pinningRef.current = null;
     setOpeningId(null);
     setPinningId(null);
     setArriving(false);
+    setActionError("");
     setScreen({ name: "profile" });
   }
 
@@ -76,6 +121,7 @@ export default function App() {
     setOpeningId(null);
     setPinningId(null);
     setArriving(false);
+    setActionError("");
     setScreen({ name: "notifications" });
   }
 
@@ -127,6 +173,70 @@ export default function App() {
   }
 
   useEffect(() => {
+    let active = true;
+    getFeed()
+      .then((page) => {
+        if (!active) return;
+        setPins((current) =>
+          page.items.map((item) => {
+            const pin = presentPin(item);
+            const previous = current.find((entry) => entry.id === pin.id);
+            return keepPreview(previous, pin);
+          }),
+        );
+        setFeedError("");
+      })
+      .catch((error) => {
+        if (!active || error.status === 401) return;
+        setFeedError(error.message);
+      })
+      .finally(() => {
+        if (active) setFeedLoading(false);
+      });
+    return () => {
+      active = false;
+    };
+  }, []);
+
+  useEffect(() => {
+    if (!user) {
+      setBoards([]);
+      setBoardsLoading(false);
+      return undefined;
+    }
+    let active = true;
+    setBoardsLoading(true);
+    getBoards(user.id)
+      .then((rows) => Promise.all(rows.map((board) => getBoard(board.id))))
+      .then((details) => {
+        if (!active) return;
+        const savedPins = details.flatMap((detail) => detail.pins ?? []);
+        setPins((current) => {
+          const next = [...current];
+          for (const item of savedPins) {
+            const pin = presentPin(item);
+            const index = next.findIndex((entry) => entry.id === pin.id);
+            if (index === -1) next.push(pin);
+            else next[index] = keepPreview(next[index], pin);
+          }
+          return next;
+        });
+        setBoards(details.map(presentBoard));
+        setBoardsError("");
+      })
+      .catch((error) => {
+        if (!active || error.status === 401) return;
+        setBoardsError(error.message);
+      })
+      .finally(() => {
+        if (active) setBoardsLoading(false);
+      });
+    return () => {
+      active = false;
+    };
+  }, [user]);
+
+  useEffect(() => {
     if (!openingId) return undefined;
     const timer = window.setTimeout(() => finishOpen(openingId), 1800);
     return () => window.clearTimeout(timer);
@@ -138,39 +248,92 @@ export default function App() {
     return () => window.clearTimeout(timer);
   }, [pinningId]);
 
-  function toggleLike(pinId) {
-    setLikedIds((current) =>
-      current.includes(pinId) ? current.filter((id) => id !== pinId) : [...current, pinId],
-    );
+  async function openBoard(id) {
+    openingRef.current = null;
+    pinningRef.current = null;
+    setOpeningId(null);
+    setPinningId(null);
+    setArriving(false);
+    setActionError("");
+    setScreen({ name: "board", id });
+    setBoardLoading(true);
+    try {
+      const detail = await getBoard(id);
+      const saved = (detail.pins ?? []).map((item) => presentPin(item));
+      setPins((current) => {
+        const next = [...current];
+        for (const pin of saved) {
+          const index = next.findIndex((entry) => entry.id === pin.id);
+          if (index === -1) next.push(pin);
+          else next[index] = keepPreview(next[index], pin);
+        }
+        return next;
+      });
+      setBoards((current) => {
+        const updated = presentBoard(detail);
+        return current.some((board) => board.id === id)
+          ? current.map((board) => (board.id === id ? updated : board))
+          : [...current, updated];
+      });
+    } catch (error) {
+      if (error.status !== 401) setActionError(error.message);
+    } finally {
+      setBoardLoading(false);
+    }
   }
 
-  function togglePinOnBoard(boardId, pinId) {
-    setBoards((current) =>
-      current.map((board) => {
-        if (board.id !== boardId) return board;
-        const saved = board.pinIds.includes(pinId);
-        return {
-          ...board,
-          pinIds: saved
-            ? board.pinIds.filter((id) => id !== pinId)
-            : [...board.pinIds, pinId],
-        };
-      }),
-    );
+  async function toggleLike(pinId) {
+    if (likedIds.includes(pinId)) return;
+    if (!requireUser()) return;
+    setLikedIds((current) => [...current, pinId]);
+    setActionError("");
+    try {
+      const result = await likePin(pinId);
+      setPins((current) =>
+        current.map((pin) => (pin.id === pinId ? { ...pin, likesCount: result.likes_count } : pin)),
+      );
+    } catch (error) {
+      setLikedIds((current) => current.filter((id) => id !== pinId));
+      if (error.status !== 401) setActionError(error.message);
+    }
+  }
+
+  async function togglePinOnBoard(boardId, pinId) {
+    if (!requireUser()) return;
+    const board = boards.find((item) => item.id === boardId);
+    if (!board) return;
+    const saved = board.pinIds.includes(pinId);
+    setActionError("");
+    try {
+      if (saved) await removePinFromBoard(boardId, pinId);
+      else await addPinToBoard(boardId, pinId);
+      setBoards((current) =>
+        current.map((item) => {
+          if (item.id !== boardId) return item;
+          const pinIds = saved
+            ? item.pinIds.filter((id) => id !== pinId)
+            : [...item.pinIds, pinId];
+          return { ...item, pinIds, pinsCount: pinIds.length };
+        }),
+      );
+    } catch (error) {
+      if (error.status !== 401) setActionError(error.message);
+    }
   }
 
   function createPin({ id, title, description, category: pinCategory, file, objectKey }) {
-    const look = noteLooks[pins.length % noteLooks.length];
-    const pin = {
-      id: id ?? crypto.randomUUID(),
-      title,
-      description,
-      category: pinCategory,
-      imageUrl: file ? URL.createObjectURL(file) : undefined,
-      objectKey,
-      ...look,
-    };
-    setPins((current) => [pin, ...current]);
+    const pin = presentPin(
+      {
+        id: id ?? crypto.randomUUID(),
+        title,
+        description,
+        category: pinCategory,
+        object_key: objectKey,
+        likes_count: 0,
+      },
+      file ? URL.createObjectURL(file) : undefined,
+    );
+    setPins((current) => [pin, ...current.filter((item) => item.id !== pin.id)]);
     setModal(null);
     setArriving(false);
     setScreen({ name: "pin", id: pin.id });
@@ -178,12 +341,7 @@ export default function App() {
 
   async function createBoard({ name, description }) {
     const created = await postBoard({ name, description });
-    const board = {
-      id: created.id,
-      name: created.name,
-      description: created.description,
-      pinIds: [],
-    };
+    const board = presentBoard(created);
     setBoards((current) => [...current, board]);
     setModal(null);
     setScreen({ name: "board", id: board.id });
@@ -191,7 +349,10 @@ export default function App() {
 
   function signOut() {
     logout();
-    if (screen.name === "notifications" || screen.name === "auth") openExplore();
+    setBoards([]);
+    if (screen.name === "notifications" || screen.name === "auth" || screen.name === "profile" || screen.name === "board") {
+      openExplore();
+    }
   }
 
   return (
@@ -221,6 +382,8 @@ export default function App() {
           onOpen={beginOpen}
           onFallen={finishOpen}
           onPinned={finishPin}
+          loading={feedLoading}
+          error={feedError}
         />
       ) : null}
       {screen.name === "pin" ? (
@@ -229,6 +392,7 @@ export default function App() {
           boards={boards}
           arriving={arriving}
           liked={selectedPin ? likedIds.includes(selectedPin.id) : false}
+          error={actionError}
           onBack={openExplore}
           onToggle={togglePinOnBoard}
           onLike={() => selectedPin && toggleLike(selectedPin.id)}
@@ -249,7 +413,9 @@ export default function App() {
         <ProfileView
           user={user}
           boards={boards}
-          onOpen={(id) => setScreen({ name: "board", id })}
+          loading={boardsLoading}
+          error={boardsError}
+          onOpen={openBoard}
           onCreate={() => {
             if (requireUser()) setModal("board");
           }}
@@ -259,6 +425,8 @@ export default function App() {
         <BoardView
           board={selectedBoard}
           pins={pins}
+          loading={boardLoading}
+          error={actionError}
           onBack={openProfile}
           fallingId={openingId}
           onOpen={beginOpen}

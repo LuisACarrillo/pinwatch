@@ -1,6 +1,15 @@
 import PinGrid from "../components/PinGrid.jsx";
 
-export default function BoardView({ board, pins, onBack, fallingId, onOpen, onFallen }) {
+export default function BoardView({
+  board,
+  pins,
+  loading = false,
+  error = "",
+  onBack,
+  fallingId,
+  onOpen,
+  onFallen,
+}) {
   if (!board) {
     return (
       <div className="page">
@@ -22,14 +31,18 @@ export default function BoardView({ board, pins, onBack, fallingId, onOpen, onFa
         </button>
         <h2>{board.name}</h2>
         {board.description ? <p className="quiet">{board.description}</p> : null}
+        {error ? <p className="form-error">{error}</p> : null}
       </div>
-      <PinGrid
-        pins={saved}
-        fallingId={fallingId}
-        onOpen={onOpen}
-        onFallen={onFallen}
-        empty="Este tablero todavía no tiene pines."
-      />
+      {loading ? <p className="empty">Cargando…</p> : null}
+      {loading ? null : (
+        <PinGrid
+          pins={saved}
+          fallingId={fallingId}
+          onOpen={onOpen}
+          onFallen={onFallen}
+          empty="Este tablero todavía no tiene pines."
+        />
+      )}
     </div>
   );
 }

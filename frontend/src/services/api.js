@@ -147,3 +147,28 @@ export function createBoard({ name, description }) {
 export function getNotifications() {
   return request("/notifications");
 }
+
+export function getFeed() {
+  return request("/feed");
+}
+
+export function getBoards(userId) {
+  const query = new URLSearchParams({ user_id: userId, limit: "100" });
+  return request(`/boards?${query}`);
+}
+
+export function getBoard(boardId) {
+  return request(`/boards/${boardId}`);
+}
+
+export function likePin(pinId) {
+  return request(`/pins/${pinId}/like`, { method: "POST" });
+}
+
+export function addPinToBoard(boardId, pinId) {
+  return request(`/boards/${boardId}/pins/${pinId}`, { method: "POST" });
+}
+
+export function removePinFromBoard(boardId, pinId) {
+  return request(`/boards/${boardId}/pins/${pinId}`, { method: "DELETE" });
+}
