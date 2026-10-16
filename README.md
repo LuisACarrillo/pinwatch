@@ -139,7 +139,7 @@ Todo se crea con la AWS CLI y scripts de bash en `infra/`. Cada script es idempo
 | RDS | Instancia `pinwatch-db` (`db.t3.micro`, PostgreSQL 16) | Base de datos relacional para usuarios, pines, tableros y asociaciones. |
 | EC2 / RDS | Security group `pinwatch-db-sg` | Acepta conexiones en el puerto 5432 únicamente desde `pinwatch-bastion-sg`. |
 | RDS | DB Subnet Group `pinwatch-db-subnet-group` | Agrupa subredes de la VPC en múltiples zonas de disponibilidad para alta compatibilidad en RDS. |
-| Lambda | `pinwatch-image-processor` (Python 3.14, x86_64, 1024 MB, `LabRole`) | Flujo 2: valida cada imagen nueva de `originals/`, genera la versión comprimida y la miniatura en WebP. |
+| Lambda | `pinwatch-image-processor` (Python 3.14, x86_64, 1024 MB, `LabRole`) | Flujo 2: valida cada imagen nueva de `originals/`, genera la versión comprimida y la miniatura en WebP, y publica el resultado en `pinwatch-events`. Está fuera de la VPC y no toca la RDS. |
 | S3 | Notificación `pinwatch-image-processor` en `pinwatch-originals-<cuenta>` | Dispara la Lambda con `s3:ObjectCreated:*` solo en el prefijo `originals/`. Las demás notificaciones del bucket se conservan. |
 | S3 | Bucket `pinwatch-processed-<cuenta>` (privado, cifrado) | Resultado del Flujo 2: `processed/<uuid>/<nombre>.webp` (1600 px de ancho máximo) y `thumbnails/<uuid>/<nombre>.webp` (400 px). |
 | CloudWatch Logs | `/aws/lambda/pinwatch-image-processor` (retención de 7 días) | Una línea JSON por imagen: `imagen_procesada` o `imagen_rechazada` con el motivo. |
@@ -209,7 +209,7 @@ db = database_settings()  # host, port, name, username, password
 
 Si la RDS se crea con `--manage-master-user-password`, RDS guarda usuario y contraseña en su propio secreto (`rds!db-…`) y lo rota cada 7 días. En ese caso `pinwatch/app` lleva `db_secret_arn` con el ARN de ese secreto, en lugar de `db_username` y `db_password`, y el helper lo sigue. Así nunca queda una copia vieja de la contraseña. Si la base rechaza la contraseña tras una rotación, `app_secrets.clear_cache()` fuerza a releerla.
 
-Pruebas del helper y del Flujo 2 (no llaman a AWS; S3 se simula con moto):
+Pruebas de la API, del helper y del Flujo 2 (no llaman a AWS: S3, SNS y SQS se simulan con moto, y la base con SQLite):
 
 ```bash
 ~/pinwatch-venv/bin/pip install -r backend/requirements-dev.txt
@@ -223,6 +223,17 @@ Cuando el formulario de un pin sube la imagen a `s3://pinwatch-originals-<cuenta
 1. **Validación.** Se revisa el contenido real del archivo, no la extensión: máximo 15 MB (se revisa con el tamaño del evento, antes de descargar), formatos JPEG, PNG o WebP, y máximo 40 megapíxeles.
 2. **Procesamiento.** Endereza la foto según el EXIF, quita los metadatos (GPS, cámara) y genera `processed/<uuid>/<nombre>.webp` (1600 px de ancho máximo) y `thumbnails/<uuid>/<nombre>.webp` (400 px) en `pinwatch-processed-<cuenta>`.
 3. **Resultado.** Escribe una línea JSON en CloudWatch: `imagen_procesada` (tamaños, medidas, duración) o `imagen_rechazada` (con el motivo).
+4. **Aviso.** Publica el mismo resultado en el tópico SNS `pinwatch-events`, con el sobre de `backend/sns.py` y el atributo `event_type` para filtrar:
+
+   ```json
+   {"event_type": "imagen_procesada", "timestamp": "...", "data": {"object_key": "originals/<uuid>/foto.jpg", "status": "processed", "processed_key": "processed/<uuid>/foto.webp", "thumbnail_key": "thumbnails/<uuid>/foto.webp"}}
+   {"event_type": "imagen_rechazada", "timestamp": "...", "data": {"object_key": "originals/<uuid>/falsa.jpg", "status": "rejected", "reason": "not_an_image"}}
+   ```
+
+**Cómo llega el resultado a la base.** La Lambda del Flujo 2 está fuera de la VPC y no se conecta a la RDS. La tabla `pins` tiene `status` (`pending`, `processed` o `rejected`), `processed_key` y `thumbnail_key`, y el feed y el detalle del pin las devuelven:
+- Al crear el pin, la API calcula `processed_key` y `thumbnail_key` a partir de `object_key` con `image_processor/keys.py`, el mismo código que usa la Lambda, y lo guarda con `status = pending`.
+- `backend/image_events.py` recibe los eventos del tópico y actualiza `status` buscando el pin por `object_key`. Si el pin es rechazado, vacía las llaves. `main.handler` le pasa los eventos de SNS y el resto se lo deja a Mangum.
+- El frontend sube la imagen antes de crear el pin, así que el evento puede llegar primero. En ese caso el suscriptor falla a propósito para que Lambda reintente la invocación.
 
 Para que no haya ciclos ni bucles:
 - El trigger solo escucha `originals/`, y la Lambda escribe en otro bucket.
@@ -230,7 +241,7 @@ Para que no haya ciclos ni bucles:
 - Un error transitorio de S3 se reintenta una sola vez.
 - Si S3 entrega el mismo evento dos veces, el resultado se sobrescribe y no se duplica.
 
-El zip se arma en WSL con los wheels `manylinux2014_x86_64` de Pillow para Python 3.14, sin Docker. Antes de subirlo se prueba en local, y si el código no cambió no se vuelve a subir.
+El zip se arma en WSL con los wheels `manylinux2014_x86_64` de Pillow para Python 3.14, sin Docker. En Linux (WSL incluido) se prueba en local antes de subirlo; en macOS esa prueba se omite, porque el Pillow del zip es para Linux. Si el código no cambió, no se vuelve a subir.
 
 **Probarlo de punta a punta desde el frontend.** Necesitas la API corriendo en Ubuntu (sección Backend) y `pnpm dev` en Windows (sección Frontend):
 
@@ -252,14 +263,11 @@ El zip se arma en WSL con los wheels `manylinux2014_x86_64` de Pillow para Pytho
    aws s3 presign s3://pinwatch-processed-<cuenta>/thumbnails/<uuid>/<nombre>.webp --expires-in 300
    ```
 
-**Pendiente para Dario (Flujo 3):**
-- `pinwatch-processed-<cuenta>` es privado, así que el feed necesita URLs prefirmadas de lectura (`generate_presigned_url("get_object", ...)`) para mostrar las miniaturas.
-- La tabla `pins` necesita estas columnas:
-  - `original_key`: única; con ella la Lambda encuentra el pin.
-  - `status`: `pending`, `processed` o `rejected`.
-  - `processed_key`.
-  - `thumbnail_key`.
-- `backend/image_processor/pin_store.py` tiene aislada la función `update_pin_record()`. Hoy solo escribe en el log (`pin_pendiente_de_guardar`); ahí va el `UPDATE` cuando exista la tabla.
+**Pendiente para cuando la API se despliegue en Lambda:**
+- Hasta que alguien se suscriba al tópico, los pines se quedan en `pending`, aunque la miniatura ya exista en S3. Hay que suscribir la Lambda de la API a `pinwatch-events` con una política de filtro `{"event_type": ["imagen_procesada", "imagen_rechazada"]}` y darle permiso a SNS para invocarla.
+- El zip de la API tiene que incluir `backend/image_processor/keys.py`, que no tiene dependencias.
+- La API necesita estar en la VPC para llegar a la RDS. Desde ahí, sin salida a internet, necesita un endpoint de gateway de S3 (gratis) y endpoints de interfaz de Secrets Manager y SNS (USD 0.01/h por zona cada uno, ~USD 7.30 al mes por endpoint en una sola zona). Sin ellos, `app_secrets` y `sns.publish_event` se quedan esperando hasta que se agota el tiempo.
+- `pinwatch-processed-<cuenta>` es privado, así que el feed necesita URLs prefirmadas de lectura (`generate_presigned_url("get_object", ...)`) a partir de `thumbnail_key` para mostrar las miniaturas.
 
 ### Variables de entorno
 
@@ -275,6 +283,7 @@ Los scripts leen la cuenta y la región de la sesión de la AWS CLI; las variabl
 | `SSH_CIDR` | Tu IP pública `/32` | Origen permitido para SSH con `EC2_ACCESS=ssh`. |
 | `LAMBDA_RUNTIME` | `python3.14` | Runtime de la Lambda del Flujo 2; el zip se arma para esa versión. |
 | `ORIGINALS_BUCKET`, `PROCESSED_BUCKET` | `pinwatch-originals-<cuenta>`, `pinwatch-processed-<cuenta>` | Buckets de entrada y salida del Flujo 2. La Lambda recibe `PROCESSED_BUCKET` como variable de entorno. |
+| `SNS_TOPIC_NAME` | `pinwatch-events` | Tópico donde la Lambda del Flujo 2 publica sus resultados; recibe su ARN como `SNS_TOPIC_ARN`. |
 
 ### Verificar que funciona
 
@@ -292,6 +301,8 @@ Los scripts leen la cuenta y la región de la sesión de la AWS CLI; las variabl
 [verify] OK     Imagen válida procesada: processed/ y thumbnails/ en pinwatch-processed-<cuenta> (miniatura: image/webp 1290 bytes)
 [verify] OK     Log en CloudWatch: imagen_procesada
 [verify] OK     Archivo falso rechazado en el log (not_an_image), sin error de la Lambda
+[verify] OK     Publicado en SNS: imagen_procesada
+[verify] OK     Publicado en SNS: imagen_rechazada
 [verify] OK     El archivo falso no generó nada en pinwatch-processed-<cuenta>
 [verify] OK     La Lambda no escribió en el bucket de originales
 [verify] Todo funciona. Se borraron los archivos de prueba de ambos buckets.
