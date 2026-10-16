@@ -24,7 +24,10 @@ CREATE TABLE IF NOT EXISTS pins (
     category TEXT NOT NULL,
     object_key TEXT NOT NULL,
     likes_count INTEGER NOT NULL DEFAULT 0,
-    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP NOT NULL
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP NOT NULL,
+    status TEXT NOT NULL DEFAULT 'pending' CHECK (status IN ('pending', 'processed', 'rejected')),
+    processed_key TEXT,
+    thumbnail_key TEXT
 );
 
 CREATE TABLE IF NOT EXISTS boards (
@@ -59,6 +62,10 @@ class SQLiteDictCursor:
     def execute(self, sql: str, params: tuple | list = ()):
         sql_converted = sql.replace("%s", "?")
         return self._cur.execute(sql_converted, params)
+
+    @property
+    def rowcount(self):
+        return self._cur.rowcount
 
     def fetchone(self):
         row = self._cur.fetchone()

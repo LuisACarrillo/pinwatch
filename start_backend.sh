@@ -16,27 +16,31 @@ log "Iniciando despliegue y arranque del Backend de PinWatch..."
 aws_session
 
 # 2. Bucket S3 de imágenes originales y configuración CORS
-log "1/6 Bucket S3 de imágenes originales"
+log "1/7 Bucket S3 de imágenes originales"
 python3 "$INFRA_DIR/setup_originals_bucket.py"
 
 # 3. AWS Secrets Manager (JWT keys y configuración base)
-log "2/6 Secrets Manager (pinwatch/app)"
+log "2/7 Secrets Manager (pinwatch/app)"
 bash "$INFRA_DIR/secrets.sh" up
 
 # 4. Amazon SNS (tópico pinwatch-events para notificaciones asíncronas)
-log "3/6 Amazon SNS (pinwatch-events)"
+log "3/7 Amazon SNS (pinwatch-events)"
 bash "$INFRA_DIR/sns.sh" up
 
 # 5. Bastión EC2 (acceso seguro vía Session Manager y cliente psql)
-log "4/6 Bastión EC2 (pinwatch-bastion)"
+log "4/7 Bastión EC2 (pinwatch-bastion)"
 bash "$INFRA_DIR/ec2.sh" up
 
 # 6. Base de datos Amazon RDS PostgreSQL y migración de esquema
-log "5/6 Amazon RDS PostgreSQL y esquema de base de datos"
+log "5/7 Amazon RDS PostgreSQL y esquema de base de datos"
 bash "$INFRA_DIR/rds.sh" up
 
-# 7. Preparación del entorno Python del backend
-log "6/6 Preparando entorno de ejecución Python y dependencias"
+# 7. Flujo 2: Lambda de procesamiento de imágenes y trigger de S3 en originals/
+log "6/7 Flujo 2: procesamiento de imágenes"
+bash "$INFRA_DIR/image_processor.sh" up
+
+# 8. Preparación del entorno Python del backend
+log "7/7 Preparando entorno de ejecución Python y dependencias"
 
 VENV_PATH=""
 if [[ -d "$ROOT_DIR/.venv" ]]; then

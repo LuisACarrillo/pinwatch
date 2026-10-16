@@ -82,8 +82,109 @@ else
   log "AVISO  Tópico SNS pinwatch-events no encontrado (ejecuta 'bash infra/sns.sh up' para crearlo)"
 fi
 
+# 7. Flujo 2 de punta a punta: una imagen válida y un texto disfrazado de .jpg en originals/.
+ORIGINALS_BUCKET="${ORIGINALS_BUCKET:-pinwatch-originals-$ACCOUNT_ID}"
+PROCESSED_BUCKET="${PROCESSED_BUCKET:-pinwatch-processed-$ACCOUNT_ID}"
+LOG_GROUP="/aws/lambda/pinwatch-image-processor"
+STAMP="verify-$(date +%s)"
+WORK="$(mktemp -d)"
+VALID_KEY="originals/$STAMP/prueba.png"
+FAKE_KEY="originals/$STAMP/falsa.jpg"
+
+cleanup_flow2() {
+  local key
+  for key in "$VALID_KEY" "$FAKE_KEY"; do
+    aws s3api delete-object --bucket "$ORIGINALS_BUCKET" --key "$key" >/dev/null 2>&1 || true
+  done
+  for key in "processed/$STAMP/prueba.webp" "thumbnails/$STAMP/prueba.webp"; do
+    aws s3api delete-object --bucket "$PROCESSED_BUCKET" --key "$key" >/dev/null 2>&1 || true
+  done
+  rm -rf "$WORK"
+}
+trap cleanup_flow2 EXIT
+
+if ! aws lambda get-function --function-name pinwatch-image-processor >/dev/null 2>&1; then
+  fail "La Lambda pinwatch-image-processor no existe"
+else
+  # PNG de 1200x800 hecho a mano (la python3 del sistema no trae Pillow).
+  python3 - "$WORK/prueba.png" <<'EOF'
+import struct, sys, zlib
+width, height = 1200, 800
+def chunk(tag, data):
+    return struct.pack(">I", len(data)) + tag + data + struct.pack(">I", zlib.crc32(tag + data) & 0xFFFFFFFF)
+rows = b"".join(
+    b"\x00" + bytes(v for x in range(width) for v in (x * 255 // width, y * 255 // height, 160))
+    for y in range(height)
+)
+png = b"\x89PNG\r\n\x1a\n" + chunk(b"IHDR", struct.pack(">IIBBBBB", width, height, 8, 2, 0, 0, 0))
+png += chunk(b"IDAT", zlib.compress(rows)) + chunk(b"IEND", b"")
+open(sys.argv[1], "wb").write(png)
+EOF
+  printf 'no soy una imagen, aunque me llame .jpg\n' >"$WORK/falsa.jpg"
+
+  start_ms="$(($(date +%s) * 1000 - 5000))"
+  aws s3api put-object --bucket "$ORIGINALS_BUCKET" --key "$VALID_KEY" \
+    --body "$WORK/prueba.png" --content-type image/png >/dev/null
+  aws s3api put-object --bucket "$ORIGINALS_BUCKET" --key "$FAKE_KEY" \
+    --body "$WORK/falsa.jpg" --content-type image/jpeg >/dev/null
+  log "Subidos $VALID_KEY y $FAKE_KEY; esperando a la Lambda (hasta 90 s)"
+
+  outputs=""
+  for _ in $(seq 1 30); do
+    if aws s3api head-object --bucket "$PROCESSED_BUCKET" --key "processed/$STAMP/prueba.webp" >/dev/null 2>&1 &&
+      outputs="$(aws s3api head-object --bucket "$PROCESSED_BUCKET" --key "thumbnails/$STAMP/prueba.webp" \
+        --query '[ContentType, ContentLength]' --output text 2>/dev/null | tr '\t' ' ')"; then
+      break
+    fi
+    sleep 3
+  done
+  if [[ -n "$outputs" ]]; then
+    pass "Imagen válida procesada: processed/ y thumbnails/ en $PROCESSED_BUCKET (miniatura: $outputs bytes)"
+  else
+    fail "No aparecieron processed/$STAMP/prueba.webp y thumbnails/$STAMP/prueba.webp"
+  fi
+
+  # CloudWatch tarda unos segundos en mostrar los logs.
+  messages=""
+  for _ in $(seq 1 30); do
+    # Un mensaje por línea (con --output text quedan todos en una, separados por tabuladores).
+    messages="$(aws logs filter-log-events --log-group-name "$LOG_GROUP" --start-time "$start_ms" \
+      --filter-pattern "\"$STAMP\"" --query 'events[].message' --output json 2>/dev/null |
+      python3 -c 'import json, sys; print("\n".join(m.replace("\n", " ") for m in json.load(sys.stdin)))' \
+        2>/dev/null || true)"
+    grep -q '"imagen_procesada"' <<<"$messages" && grep -q '"imagen_rechazada"' <<<"$messages" &&
+      (($(grep -c '"evento_publicado"' <<<"$messages") >= 2)) && break
+    sleep 3
+  done
+  if grep -q '"imagen_procesada"' <<<"$messages"; then
+    pass "Log en CloudWatch: imagen_procesada"
+  else
+    fail "No apareció imagen_procesada en $LOG_GROUP"
+  fi
+  if grep -q '"reason": "not_an_image"' <<<"$messages"; then
+    pass "Archivo falso rechazado en el log (not_an_image), sin error de la Lambda"
+  else
+    fail "No apareció imagen_rechazada con not_an_image en $LOG_GROUP"
+  fi
+  # La Lambda no toca la RDS: avisa el resultado al tópico SNS de Dario.
+  for event_type in imagen_procesada imagen_rechazada; do
+    if grep '"evento_publicado"' <<<"$messages" | grep -q "\"event_type\": \"$event_type\""; then
+      pass "Publicado en SNS: $event_type"
+    else
+      fail "La Lambda no publicó $event_type en SNS (¿existe pinwatch-events? corre 'bash infra/image_processor.sh status')"
+    fi
+  done
+  if aws s3api head-object --bucket "$PROCESSED_BUCKET" --key "processed/$STAMP/falsa.webp" >/dev/null 2>&1; then
+    fail "El archivo falso generó salida en processed/"
+  else
+    pass "El archivo falso no generó nada en $PROCESSED_BUCKET"
+  fi
+
+  # aws s3 ls y no s3api list-objects-v2: este último falla con la AWS CLI de apt sobre Python 3.14.
+  count="$(aws s3 ls "s3://$ORIGINALS_BUCKET/originals/$STAMP/" | wc -l | tr -d ' ')"
+  [[ "$count" == 2 ]] && pass "La Lambda no escribió en el bucket de originales" ||
+    fail "Hay $count objetos en originals/$STAMP/ (se esperaban 2)"
+fi
+
 ((FAILURES == 0)) || die "$FAILURES verificación(es) fallaron."
-log "Todo funciona."
-
-
-
+log "Todo funciona. Se borraron los archivos de prueba de ambos buckets."
