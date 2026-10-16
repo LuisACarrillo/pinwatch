@@ -127,6 +127,8 @@ pnpm preview
 
 ## Infraestructura en AWS: S3, Secrets Manager, SNS, Bastión EC2, Amazon RDS y Flujo 2
 
+> **Cuenta oficial:** la demo y el CI/CD del proyecto viven en la cuenta del Learner Lab de Luis Fernando. El resto del equipo prueba en su propio lab.
+
 Todo se crea con la AWS CLI y scripts de bash en `infra/`. Cada script es idempotente y se puede correr varias veces: si el recurso ya existe, lo reutiliza. `teardown.sh` borra lo creado por los scripts (con confirmación), **incluida la RDS sin snapshot final**. No borra el bucket de originales; de él solo retira la notificación del Flujo 2.
 
 | Servicio | Recurso | Para qué |
