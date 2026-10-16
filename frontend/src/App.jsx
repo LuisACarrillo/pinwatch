@@ -29,11 +29,14 @@ function presentPin(pin, imageUrl) {
     category: pin.category,
     likesCount: pin.likes_count ?? pin.likesCount ?? 0,
     objectKey: pin.object_key ?? pin.objectKey,
-    imageUrl,
+    imageUrl: imageUrl || pin.thumbnail_url || undefined,
   };
 }
 
 function keepPreview(previous, pin) {
+  if (typeof previous?.imageUrl === "string" && previous.imageUrl.startsWith("blob:")) {
+    return { ...pin, imageUrl: previous.imageUrl };
+  }
   return previous?.imageUrl && !pin.imageUrl ? { ...pin, imageUrl: previous.imageUrl } : pin;
 }
 

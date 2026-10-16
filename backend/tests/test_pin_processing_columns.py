@@ -39,6 +39,26 @@ def test_new_pin_is_pending_with_keys_derived_from_object_key(client):
         assert result["thumbnail_key"] == "thumbnails/abc/atardecer.webp"
 
 
+def test_feed_includes_a_signed_thumbnail_url(client, monkeypatch):
+    monkeypatch.setattr(main, "thumbnail_url", lambda key: f"https://signed.example/{key}" if key else None)
+    create_pin(client)
+
+    item = client.get("/feed").json()["items"][0]
+    assert item["thumbnail_url"] == "https://signed.example/thumbnails/abc/atardecer.webp"
+
+
+def test_feed_still_loads_when_the_thumbnail_cannot_be_signed(client, monkeypatch):
+    def unavailable():
+        raise main.HTTPException(status_code=503, detail="No se pudieron leer las credenciales de AWS.")
+
+    monkeypatch.setattr(main, "processed_bucket", unavailable)
+    create_pin(client)
+
+    item = client.get("/feed").json()["items"][0]
+    assert item["thumbnail_key"] == "thumbnails/abc/atardecer.webp"
+    assert item["thumbnail_url"] is None
+
+
 def test_pin_outside_originals_has_no_keys(client):
     pin = create_pin(client, object_key="otra/ruta/foto.jpg")
     assert (pin["processed_key"], pin["thumbnail_key"]) == (None, None)

@@ -1,3 +1,4 @@
+import logging
 import math
 import os
 import re
@@ -21,6 +22,8 @@ from image_processor.keys import InvalidImage, output_keys
 import database
 import image_events
 import sns
+
+logger = logging.getLogger(__name__)
 
 app = FastAPI(
     title="PinWatch API",
@@ -114,6 +117,7 @@ class PinResponse(BaseModel):
     status: Literal["pending", "processed", "rejected"] = "pending"
     processed_key: str | None = None
     thumbnail_key: str | None = None
+    thumbnail_url: str | None = None
 
 
 class PaginatedFeed(BaseModel):
@@ -175,6 +179,7 @@ class AddPinToBoard(BaseModel):
 # ============================================================================
 
 _originals_bucket: str | None = None
+_processed_bucket: str | None = None
 
 
 def originals_bucket() -> str:
@@ -197,6 +202,48 @@ def originals_bucket() -> str:
 
     _originals_bucket = f"pinwatch-originals-{account}"
     return _originals_bucket
+
+
+def processed_bucket() -> str:
+    global _processed_bucket
+    if _processed_bucket:
+        return _processed_bucket
+
+    configured = os.environ.get("PROCESSED_BUCKET", "").strip()
+    if configured:
+        _processed_bucket = configured
+        return _processed_bucket
+
+    try:
+        account = boto3.client("sts").get_caller_identity()["Account"]
+    except (BotoCoreError, ClientError) as error:
+        raise HTTPException(
+            status_code=503,
+            detail="No se pudieron leer las credenciales de AWS.",
+        ) from error
+
+    _processed_bucket = f"pinwatch-processed-{account}"
+    return _processed_bucket
+
+
+def thumbnail_url(key: str | None) -> str | None:
+    if not key:
+        return None
+    try:
+        return s3_client().generate_presigned_url(
+            "get_object",
+            Params={"Bucket": processed_bucket(), "Key": key},
+            ExpiresIn=900,
+        )
+    except (BotoCoreError, ClientError, HTTPException) as error:
+        logger.warning("No se pudo firmar la miniatura %s: %s", key, error)
+        return None
+
+
+def with_thumbnail_url(pin: dict[str, Any]) -> dict[str, Any]:
+    signed = dict(pin)
+    signed["thumbnail_url"] = thumbnail_url(signed.get("thumbnail_key"))
+    return signed
 
 
 def object_key(filename: str) -> str:
@@ -314,7 +361,7 @@ def create_pin(pin: PinCreate, current_user: CurrentUser = Depends(get_current_u
         },
         subject=f"PinWatch: Nuevo pin en {result['category']}",
     )
-    return result
+    return with_thumbnail_url(result)
 
 
 @app.get("/feed", response_model=PaginatedFeed)
@@ -365,7 +412,7 @@ def get_feed(
     except Exception as err:
         raise HTTPException(status_code=500, detail=f"Error al consultar el feed: {err}") from err
 
-    items = [PinResponse(**row) for row in rows]
+    items = [PinResponse(**with_thumbnail_url(row)) for row in rows]
     total_pages = math.ceil(total / limit) if total > 0 else 1
 
     return PaginatedFeed(
@@ -394,7 +441,7 @@ def get_pin(pin_id: str) -> dict[str, Any]:
                 pin = cur.fetchone()
                 if not pin:
                     raise HTTPException(status_code=404, detail="Pin no encontrado.")
-                return dict(pin)
+                return with_thumbnail_url(pin)
     except HTTPException:
         raise
     except Exception as err:
@@ -599,7 +646,7 @@ def get_board(board_id: str) -> dict[str, Any]:
                 )
                 pins = cur.fetchall()
                 result = dict(board)
-                result["pins"] = [dict(p) for p in pins]
+                result["pins"] = [with_thumbnail_url(p) for p in pins]
                 return result
     except HTTPException:
         raise
