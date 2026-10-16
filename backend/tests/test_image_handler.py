@@ -7,7 +7,7 @@ import pytest
 from moto import mock_aws
 from PIL import Image
 
-from image_processor import handler
+from image_processor import events, handler
 
 ORIGINALS = "pinwatch-originals-123456789012"
 PROCESSED = "pinwatch-processed-123456789012"
@@ -52,12 +52,31 @@ def s3(monkeypatch):
         yield client
 
 
+@pytest.fixture
+def topic(s3, monkeypatch):
+    """Tópico SNS con una cola SQS suscrita; devuelve una función que lee lo publicado."""
+    sns = boto3.client("sns", region_name="us-east-1")
+    sqs = boto3.client("sqs", region_name="us-east-1")
+    topic_arn = sns.create_topic(Name="pinwatch-events")["TopicArn"]
+    queue_url = sqs.create_queue(QueueName="pinwatch-events-test")["QueueUrl"]
+    queue_arn = sqs.get_queue_attributes(QueueUrl=queue_url, AttributeNames=["QueueArn"])["Attributes"]["QueueArn"]
+    sns.subscribe(TopicArn=topic_arn, Protocol="sqs", Endpoint=queue_arn)
+    monkeypatch.setenv("SNS_TOPIC_ARN", topic_arn)
+    monkeypatch.setattr(events, "_sns", sns)
+
+    def published() -> list[dict]:
+        messages = sqs.receive_message(QueueUrl=queue_url, MaxNumberOfMessages=10).get("Messages", [])
+        return [json.loads(m["Body"]) for m in messages]
+
+    return published
+
+
 def keys(client, bucket: str) -> list[str]:
     return sorted(item["Key"] for item in client.list_objects_v2(Bucket=bucket).get("Contents", []))
 
 
 def logged_events(caplog) -> list[dict]:
-    own = (r for r in caplog.records if r.name in ("root", "image_processor.pin_store"))
+    own = (r for r in caplog.records if r.name in ("root", "image_processor.events"))
     return [json.loads(record.getMessage()) for record in own]
 
 
@@ -78,11 +97,56 @@ def test_valid_image_produces_processed_and_thumbnail(s3, caplog):
     assert thumbnail["Metadata"]["original-key"] == "originals/abc/foto de playa.jpg"
     assert Image.open(BytesIO(thumbnail["Body"].read())).size == (400, 300)
 
-    events = logged_events(caplog)
-    assert {"pin_pendiente_de_guardar", "imagen_procesada"} <= {e["event"] for e in events}
-    pin = next(e for e in events if e["event"] == "pin_pendiente_de_guardar")
-    assert pin["status"] == "processed"
-    assert pin["thumbnail_key"] == "thumbnails/abc/foto de playa.webp"
+    # Sin SNS_TOPIC_ARN el resultado solo queda en el log.
+    logged = logged_events(caplog)
+    assert {"evento_sin_topico", "imagen_procesada"} <= {e["event"] for e in logged}
+    pending = next(e for e in logged if e["event"] == "evento_sin_topico")
+    assert pending["data"]["status"] == "processed"
+    assert pending["data"]["thumbnail_key"] == "thumbnails/abc/foto de playa.webp"
+
+
+def test_processed_image_is_published_to_sns(s3, topic):
+    data = make_jpeg()
+    s3.put_object(Bucket=ORIGINALS, Key="originals/abc/foto.jpg", Body=data)
+
+    handler.handler(s3_event("originals/abc/foto.jpg", len(data)), None)
+
+    [notification] = topic()
+    assert notification["MessageAttributes"]["event_type"]["Value"] == "imagen_procesada"
+    message = json.loads(notification["Message"])
+    assert message["event_type"] == "imagen_procesada"
+    assert message["data"] == {
+        "object_key": "originals/abc/foto.jpg",
+        "status": "processed",
+        "processed_key": "processed/abc/foto.webp",
+        "thumbnail_key": "thumbnails/abc/foto.webp",
+    }
+
+
+def test_rejected_image_is_published_to_sns(s3, topic):
+    body = b"no soy una imagen"
+    s3.put_object(Bucket=ORIGINALS, Key="originals/abc/falsa.jpg", Body=body)
+
+    handler.handler(s3_event("originals/abc/falsa.jpg", len(body)), None)
+
+    [notification] = topic()
+    message = json.loads(notification["Message"])
+    assert message["event_type"] == "imagen_rechazada"
+    assert message["data"] == {"object_key": "originals/abc/falsa.jpg", "status": "rejected", "reason": "not_an_image"}
+
+
+def test_sns_error_is_raised_for_retry(s3, topic, monkeypatch):
+    from botocore.exceptions import ClientError
+
+    def failing_publish(**kwargs):
+        raise ClientError({"Error": {"Code": "Throttling", "Message": "Reduce la tasa"}}, "Publish")
+
+    monkeypatch.setattr(events.sns(), "publish", failing_publish)
+    data = make_jpeg()
+    s3.put_object(Bucket=ORIGINALS, Key="originals/abc/foto.jpg", Body=data)
+
+    with pytest.raises(ClientError):
+        handler.handler(s3_event("originals/abc/foto.jpg", len(data)), None)
 
 
 def test_originals_bucket_is_never_written(s3):

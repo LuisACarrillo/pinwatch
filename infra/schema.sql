@@ -25,7 +25,8 @@ ALTER TABLE pins ADD COLUMN IF NOT EXISTS likes_count INTEGER NOT NULL DEFAULT 0
 
 -- Flujo 2: resultado del procesamiento de la imagen (object_key es la llave en originals/).
 -- status: pending al crear el pin, processed o rejected cuando termina la Lambda.
--- processed_key y thumbnail_key: llaves en el bucket pinwatch-processed-<cuenta>; NULL mientras no haya.
+-- processed_key y thumbnail_key: llaves en el bucket pinwatch-processed-<cuenta>. La API las calcula
+-- de object_key al crear el pin; los archivos existen cuando status es processed.
 ALTER TABLE pins ADD COLUMN IF NOT EXISTS status VARCHAR(20) NOT NULL DEFAULT 'pending'
     CHECK (status IN ('pending', 'processed', 'rejected'));
 ALTER TABLE pins ADD COLUMN IF NOT EXISTS processed_key VARCHAR(512);

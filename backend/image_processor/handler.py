@@ -1,7 +1,7 @@
 """Punto de entrada de la Lambda: recibe eventos de S3 de originals/ y procesa cada imagen.
 
 Una imagen inválida se registra y se da por terminada: lanzar un error haría que Lambda
-reintentara algo que nunca va a pasar. Solo los errores transitorios (S3 no responde)
+reintentara algo que nunca va a pasar. Solo los errores transitorios (S3 o SNS no responden)
 se lanzan, y la función tiene un reintento como máximo.
 """
 
@@ -14,7 +14,7 @@ import urllib.parse
 import boto3
 from botocore.exceptions import ClientError
 
-from image_processor import pin_store
+from image_processor import events
 from image_processor.processing import (
     MAX_BYTES,
     ORIGINALS_PREFIX,
@@ -80,7 +80,7 @@ def process_record(record) -> dict:
         result = process(data)
     except InvalidImage as error:
         log("imagen_rechazada", bucket=bucket, key=key, size=size, reason=error.reason, detail=str(error))
-        pin_store.update_pin_record(key, "rejected", reason=error.reason)
+        events.publish("imagen_rechazada", key, status="rejected", reason=error.reason)
         return {"key": key, "status": "rejected", "reason": error.reason}
 
     for target_key, rendition in ((processed_key, result.processed), (thumbnail_key, result.thumbnail)):
@@ -92,7 +92,6 @@ def process_record(record) -> dict:
             Metadata={"original-key": key},
         )
 
-    pin_store.update_pin_record(key, "processed", processed_key, thumbnail_key)
     log(
         "imagen_procesada",
         bucket=bucket,
@@ -106,6 +105,9 @@ def process_record(record) -> dict:
         thumbnail_size=len(result.thumbnail.data),
         thumbnail_dimensions=f"{result.thumbnail.width}x{result.thumbnail.height}",
         duration_ms=round((time.perf_counter() - started) * 1000),
+    )
+    events.publish(
+        "imagen_procesada", key, status="processed", processed_key=processed_key, thumbnail_key=thumbnail_key
     )
     return {
         "key": key,

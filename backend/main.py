@@ -15,7 +15,9 @@ from mangum import Mangum
 from pydantic import BaseModel, Field, field_validator
 
 from app_secrets import SecretError
+from image_processor.keys import InvalidImage, output_keys
 import database
+import image_events
 import sns
 
 app = FastAPI(
@@ -301,17 +303,33 @@ def get_user(user_id: str) -> dict[str, Any]:
 def create_pin(pin: PinCreate) -> dict[str, Any]:
     pin_id = str(uuid4())
     now = datetime.now(timezone.utc)
+    # Las mismas llaves que escribe la Lambda del Flujo 2; existen en S3 cuando status es processed.
+    try:
+        processed_key, thumbnail_key = output_keys(pin.object_key)
+    except InvalidImage:
+        processed_key = thumbnail_key = None
     try:
         with database.get_db() as conn:
             with conn.cursor() as cur:
                 cur.execute(
                     """
-                    INSERT INTO pins (id, user_id, title, description, category, object_key, likes_count, created_at)
-                    VALUES (%s, %s, %s, %s, %s, %s, 0, %s)
+                    INSERT INTO pins (id, user_id, title, description, category, object_key, likes_count, created_at,
+                                      processed_key, thumbnail_key)
+                    VALUES (%s, %s, %s, %s, %s, %s, 0, %s, %s, %s)
                     RETURNING id, user_id, title, description, category, object_key, likes_count, created_at,
                               status, processed_key, thumbnail_key;
                     """,
-                    (pin_id, pin.user_id, pin.title, pin.description, pin.category, pin.object_key, now),
+                    (
+                        pin_id,
+                        pin.user_id,
+                        pin.title,
+                        pin.description,
+                        pin.category,
+                        pin.object_key,
+                        now,
+                        processed_key,
+                        thumbnail_key,
+                    ),
                 )
                 row = cur.fetchone()
     except SecretError as err:
@@ -735,4 +753,11 @@ def remove_pin_from_board(board_id: str, pin_id: str) -> dict[str, Any]:
 
 
 # Punto de entrada de AWS Lambda (API Gateway, Function URL o ALB).
-handler = Mangum(app)
+_http_handler = Mangum(app)
+
+
+def handler(event, context):
+    # El tópico pinwatch-events invoca la misma Lambda con el resultado del Flujo 2.
+    if image_events.is_sns_event(event):
+        return image_events.handle_sns_event(event)
+    return _http_handler(event, context)

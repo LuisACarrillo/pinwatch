@@ -147,9 +147,13 @@ EOF
   # CloudWatch tarda unos segundos en mostrar los logs.
   messages=""
   for _ in $(seq 1 30); do
+    # Un mensaje por línea (con --output text quedan todos en una, separados por tabuladores).
     messages="$(aws logs filter-log-events --log-group-name "$LOG_GROUP" --start-time "$start_ms" \
-      --filter-pattern "\"$STAMP\"" --query 'events[].message' --output text 2>/dev/null || true)"
-    grep -q '"imagen_procesada"' <<<"$messages" && grep -q '"imagen_rechazada"' <<<"$messages" && break
+      --filter-pattern "\"$STAMP\"" --query 'events[].message' --output json 2>/dev/null |
+      python3 -c 'import json, sys; print("\n".join(m.replace("\n", " ") for m in json.load(sys.stdin)))' \
+        2>/dev/null || true)"
+    grep -q '"imagen_procesada"' <<<"$messages" && grep -q '"imagen_rechazada"' <<<"$messages" &&
+      (($(grep -c '"evento_publicado"' <<<"$messages") >= 2)) && break
     sleep 3
   done
   if grep -q '"imagen_procesada"' <<<"$messages"; then
@@ -162,6 +166,14 @@ EOF
   else
     fail "No apareció imagen_rechazada con not_an_image en $LOG_GROUP"
   fi
+  # La Lambda no toca la RDS: avisa el resultado al tópico SNS de Dario.
+  for event_type in imagen_procesada imagen_rechazada; do
+    if grep '"evento_publicado"' <<<"$messages" | grep -q "\"event_type\": \"$event_type\""; then
+      pass "Publicado en SNS: $event_type"
+    else
+      fail "La Lambda no publicó $event_type en SNS (¿existe pinwatch-events? corre 'bash infra/image_processor.sh status')"
+    fi
+  done
   if aws s3api head-object --bucket "$PROCESSED_BUCKET" --key "processed/$STAMP/falsa.webp" >/dev/null 2>&1; then
     fail "El archivo falso generó salida en processed/"
   else

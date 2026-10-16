@@ -63,6 +63,10 @@ class SQLiteDictCursor:
         sql_converted = sql.replace("%s", "?")
         return self._cur.execute(sql_converted, params)
 
+    @property
+    def rowcount(self):
+        return self._cur.rowcount
+
     def fetchone(self):
         row = self._cur.fetchone()
         return dict(row) if row is not None else None

@@ -2,13 +2,10 @@
 
 from dataclasses import dataclass
 from io import BytesIO
-from pathlib import PurePosixPath
 
 from PIL import Image, ImageOps, UnidentifiedImageError
 
-ORIGINALS_PREFIX = "originals/"
-PROCESSED_PREFIX = "processed/"
-THUMBNAILS_PREFIX = "thumbnails/"
+from image_processor.keys import ORIGINALS_PREFIX, InvalidImage, output_keys  # noqa: F401
 
 MAX_BYTES = 15 * 1024 * 1024
 # Límite de píxeles contra "bombas de descompresión": archivos chicos que ocupan GB en memoria.
@@ -19,14 +16,6 @@ PROCESSED_MAX_WIDTH = 1600
 PROCESSED_QUALITY = 80
 THUMBNAIL_MAX_WIDTH = 400
 THUMBNAIL_QUALITY = 75
-
-
-class InvalidImage(ValueError):
-    """El archivo no se procesa. `reason` es un código estable para logs y para la base."""
-
-    def __init__(self, reason: str, message: str) -> None:
-        super().__init__(message)
-        self.reason = reason
 
 
 @dataclass(frozen=True)
@@ -43,21 +32,6 @@ class ProcessedImage:
     source_height: int
     processed: Rendition
     thumbnail: Rendition
-
-
-def output_keys(original_key: str) -> tuple[str, str]:
-    """originals/<uuid>/foto.jpg -> (processed/<uuid>/foto.webp, thumbnails/<uuid>/foto.webp).
-
-    Las llaves salen solo de la original: si S3 entrega el evento dos veces, se
-    sobrescribe el mismo archivo en vez de duplicarlo.
-    """
-    if not original_key.startswith(ORIGINALS_PREFIX):
-        raise InvalidImage("bad_key", f"La llave no está en {ORIGINALS_PREFIX}.")
-    relative = PurePosixPath(original_key[len(ORIGINALS_PREFIX) :])
-    if not relative.name or ".." in relative.parts:
-        raise InvalidImage("bad_key", "La llave no tiene nombre de archivo.")
-    target = relative.with_suffix(".webp").as_posix()
-    return f"{PROCESSED_PREFIX}{target}", f"{THUMBNAILS_PREFIX}{target}"
 
 
 def validate(data: bytes) -> str:

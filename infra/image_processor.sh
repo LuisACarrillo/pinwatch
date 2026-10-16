@@ -6,9 +6,12 @@
 #
 # El bucket de originales es de Luis Alberto (infra/setup_originals_bucket.py): up lo crea si
 # falta, pero down nunca lo borra. De su notificación solo se toca la entrada de esta Lambda.
+# La Lambda queda fuera de la VPC y no toca la RDS: publica el resultado en el tópico SNS de
+# Dario (pinwatch-events) y down no lo borra.
 #
 # Variables opcionales:
 #   LAMBDA_RUNTIME  runtime de Python de la Lambda (python3.14 por defecto)
+#   SNS_TOPIC_NAME  tópico donde se publican los resultados (pinwatch-events por defecto)
 set -euo pipefail
 INFRA_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_DIR="$(dirname "$INFRA_DIR")"
@@ -26,10 +29,17 @@ DIST_DIR="$REPO_DIR/dist"
 ZIP_PATH="$DIST_DIR/image_processor.zip"
 LOG_GROUP="/aws/lambda/$FUNCTION_NAME"
 LOG_RETENTION_DAYS=7
+SNS_TOPIC_NAME="${SNS_TOPIC_NAME:-pinwatch-events}"
 
 set_names() {
   ORIGINALS_BUCKET="${ORIGINALS_BUCKET:-pinwatch-originals-$ACCOUNT_ID}"
   PROCESSED_BUCKET="${PROCESSED_BUCKET:-pinwatch-processed-$ACCOUNT_ID}"
+}
+
+# El tópico es de Dario (infra/sns.sh); up.sh lo crea antes que el Flujo 2.
+find_topic_arn() {
+  aws sns list-topics --query "Topics[?ends_with(TopicArn, ':$SNS_TOPIC_NAME')].TopicArn" \
+    --output text 2>/dev/null | grep -v '^None$' || true
 }
 
 bucket_exists() { aws s3api head-bucket --bucket "$1" >/dev/null 2>&1; }
@@ -126,7 +136,8 @@ wait_function() {
 deploy_function() {
   local role environment local_hash remote_hash
   role="$(lab_role_arn)"
-  environment="Variables={PROCESSED_BUCKET=$PROCESSED_BUCKET}"
+  environment="$(python3 -c 'import json, sys; print(json.dumps({"Variables": {"PROCESSED_BUCKET": sys.argv[1], "SNS_TOPIC_ARN": sys.argv[2]}}))' \
+    "$PROCESSED_BUCKET" "$SNS_TOPIC_ARN")"
 
   if ! function_exists; then
     log "Creando la Lambda $FUNCTION_NAME ($RUNTIME, $ARCHITECTURE) con LabRole"
@@ -254,6 +265,12 @@ image_processor_up() {
   set_names
   ensure_originals_bucket
   ensure_processed_bucket
+  SNS_TOPIC_ARN="$(find_topic_arn)"
+  if [[ -n "$SNS_TOPIC_ARN" ]]; then
+    log "Los resultados se publican en $SNS_TOPIC_ARN"
+  else
+    warn "No existe el tópico $SNS_TOPIC_NAME: los resultados solo quedarán en el log. Créalo con: bash infra/sns.sh up"
+  fi
   build_zip
   deploy_function
   configure_function
@@ -266,6 +283,11 @@ image_processor_status() {
   if function_exists; then
     log "$FUNCTION_NAME: $(aws lambda get-function-configuration --function-name "$FUNCTION_NAME" \
       --query '[State, Runtime, Architectures[0], LastModified]' --output text)"
+    local topic
+    topic="$(aws lambda get-function-configuration --function-name "$FUNCTION_NAME" \
+      --query 'Environment.Variables.SNS_TOPIC_ARN' --output text)"
+    [[ -n "$topic" && "$topic" != "None" ]] && log "Publica resultados en: $topic" ||
+      log "Publica resultados en: (sin tópico; solo log)"
   else
     log "$FUNCTION_NAME: no existe"
   fi
