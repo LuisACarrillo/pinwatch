@@ -14,6 +14,7 @@ El repositorio separa la API, la interfaz y los pipelines. El frontend se gestio
 pinwatch/
 ├── backend/                  # API FastAPI, empaquetable en AWS Lambda
 │   ├── main.py               # App, GET /health, POST /pins/presign-url y handler de Mangum
+│   ├── auth.py               # Registro, login y JWT (/auth/register, /auth/login, /auth/me)
 │   ├── app_secrets.py        # Configuración leída de AWS Secrets Manager
 │   ├── database.py           # Conexión a PostgreSQL (RDS)
 │   ├── sns.py                # Publicación de eventos en Amazon SNS
@@ -100,8 +101,34 @@ Este script ejecuta automáticamente en el orden estricto necesario:
 La API quedará disponible de inmediato:
 - Salud local: [http://localhost:8000/health](http://localhost:8000/health)
 - Documentación interactiva: [http://localhost:8000/docs](http://localhost:8000/docs)
-- Subida: `POST /pins/presign-url` devuelve una URL firmada de `PutObject` hacia `originals/`
-- Handler de Lambda: `main.handler`
+- Subida: `POST /pins/presign-url` (requiere token) devuelve una URL firmada de `PutObject` hacia `originals/`
+- Handler de Lambda: `main.handler` (los eventos de SNS van a `image_events`; lo demás, a Mangum)
+
+### Autenticación con JWT
+
+`backend/auth.py` maneja las cuentas sobre la tabla `users`:
+
+| Ruta | Cuerpo | Respuesta |
+| --- | --- | --- |
+| `POST /auth/register` | `{username, email, password}` | **201** con `{access_token, token_type, expires_in, user}`. **409** si el email o el username ya existen. |
+| `POST /auth/login` | `{email, password}` | **200** con `{access_token, token_type, expires_in}`. **401** "Credenciales inválidas" (no dice si falló el email o la contraseña). |
+| `GET /auth/me` | — | El usuario del token, o **401**. |
+
+- La contraseña llega en el body (fuera de localhost, siempre por HTTPS) y el servidor la guarda con **Argon2id** (`argon2-cffi`); nunca se guarda ni se regresa la contraseña. Debe tener entre 8 y 128 caracteres.
+- El token es un JWT **HS256** firmado con `jwt_signing_key` de `pinwatch/app`. Lleva `sub` (el id del usuario), `username`, `iat` y `exp`, y vence a los **60 minutos** (`JWT_TTL_MINUTES`). No hay refresh token: al vencer, el usuario vuelve a iniciar sesión.
+- Las rutas protegidas piden `Authorization: Bearer <token>` y toman el usuario del token, nunca del body ni de la query. Sin token, con el token vencido o alterado, responden **401**.
+
+| Requieren token | Abiertas |
+| --- | --- |
+| `POST /pins/presign-url`, `POST /pins`, `POST /pins/{id}/like`, `GET /notifications`, `POST /boards`, `PUT`/`DELETE /boards/{id}`, `POST`/`DELETE /boards/{id}/pins…` | `GET /feed`, `GET /pins`, `GET /pins/{id}`, `GET /boards`, `GET /boards/{id}`, `GET /users/{id}`, `GET /health` |
+
+Editar o borrar un tablero, y agregarle o quitarle pines, solo lo puede hacer su dueño; a cualquier otro usuario se le responde **403**.
+
+```bash
+TOKEN=$(curl -s -X POST localhost:8000/auth/login -H 'Content-Type: application/json' \
+  -d '{"email":"ana@example.com","password":"contrasena-segura"}' | python3 -c 'import json,sys; print(json.load(sys.stdin)["access_token"])')
+curl -s localhost:8000/auth/me -H "Authorization: Bearer $TOKEN"
+```
 
 
 ## Frontend
@@ -279,6 +306,7 @@ Los scripts leen la cuenta y la región de la sesión de la AWS CLI; las variabl
 | --- | --- | --- |
 | `APP_SECRET_NAME` | `pinwatch/app` | Nombre del secreto, para los scripts y la API. |
 | `APP_SECRET_TTL_SECONDS` | `300` | Segundos que la API guarda el secreto en memoria. |
+| `JWT_TTL_MINUTES` | `60` | Minutos de vida del token de acceso. |
 | `JWT_SIGNING_KEY`, `JWT_ALGORITHM`, `DB_HOST`, `DB_PORT`, `DB_NAME`, `DB_USERNAME`, `DB_PASSWORD`, `DB_SECRET_ARN` | vacías | Respaldo local: si se definen, ganan sobre el secreto y la API no llama a AWS. Ver `backend/.env.example`. |
 | `EC2_INSTANCE_TYPE` | `t3.micro` | Tipo de la instancia del bastión. |
 | `EC2_ACCESS` | `ssm` | `ssh` abre el puerto 22 a `SSH_CIDR` como respaldo si Session Manager falla. |
