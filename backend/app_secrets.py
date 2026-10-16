@@ -112,6 +112,11 @@ def jwt_settings() -> tuple[str, str]:
     return get_setting("jwt_signing_key"), get_setting("jwt_algorithm", "HS256")
 
 
+def sns_topic_arn() -> str:
+    """ARN del tópico SNS para notificaciones de eventos (opcional)."""
+    return get_setting("sns_topic_arn", "")
+
+
 def database_settings() -> dict[str, str]:
     """Datos de conexión a PostgreSQL.
 
