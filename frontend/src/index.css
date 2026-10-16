@@ -108,13 +108,42 @@ h3 {
 .mast nav button,
 .text-action,
 .chips button,
-.form-actions .is-current {
+.form-actions .is-current,
+.mast-bell {
   padding: 3px 9px;
   border: 0;
   background: none;
 }
 
+.mast-end {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin-left: auto;
+}
+
+.mast-bell {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 34px;
+  height: 30px;
+  padding: 0;
+}
+
+.icon {
+  display: block;
+  width: 18px;
+  height: 18px;
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 1.8;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
+
 .mast nav button.is-current,
+.mast-bell.is-current,
 .chips button.is-current,
 .form-actions .is-current {
   background: #c4473a;
@@ -127,7 +156,6 @@ h3 {
   display: flex;
   align-items: center;
   gap: 7px;
-  margin-left: auto;
 }
 
 .link-state::before {
@@ -604,6 +632,35 @@ h3 {
   border: 2px solid #4e3424;
 }
 
+.pin-actions {
+  display: flex;
+  margin-top: 16px;
+}
+
+.like {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 12px;
+  border: 2px solid #4e3424;
+  background: #fff;
+  box-shadow: 2px 2px 0 #4e3424;
+}
+
+.like .icon {
+  width: 16px;
+  height: 16px;
+}
+
+.like.is-liked {
+  background: #c4473a;
+  color: #fff8ee;
+}
+
+.like.is-liked .icon {
+  fill: currentColor;
+}
+
 .save-block {
   margin-top: 18px;
   padding-top: 14px;
@@ -745,6 +802,11 @@ h3 {
     padding: 3px 6px;
   }
 
+  .mast-bell {
+    width: 32px;
+    padding: 0;
+  }
+
   .filters {
     flex-direction: column;
     align-items: stretch;
@@ -756,8 +818,8 @@ h3 {
     gap: 22px 14px;
   }
 
-  .link-state {
-    margin-left: 0;
+  .mast-end {
+    margin-left: auto;
   }
 }
 

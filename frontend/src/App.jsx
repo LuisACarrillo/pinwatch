@@ -5,6 +5,7 @@ import Masthead from "./components/Masthead.jsx";
 import { categories, initialBoards, initialPins, noteLooks } from "./data/catalog.js";
 import BoardView from "./views/BoardView.jsx";
 import ExploreView from "./views/ExploreView.jsx";
+import NotificationsView from "./views/NotificationsView.jsx";
 import PinDetailView from "./views/PinDetailView.jsx";
 import ProfileView from "./views/ProfileView.jsx";
 
@@ -18,10 +19,16 @@ export default function App() {
   const [openingId, setOpeningId] = useState(null);
   const [pinningId, setPinningId] = useState(null);
   const [arriving, setArriving] = useState(false);
+  const [likedIds, setLikedIds] = useState([]);
   const openingRef = useRef(null);
   const pinningRef = useRef(null);
 
-  const section = screen.name === "profile" || screen.name === "board" ? "profile" : "explore";
+  const section =
+    screen.name === "profile" || screen.name === "board"
+      ? "profile"
+      : screen.name === "notifications"
+        ? "notifications"
+        : "explore";
   const selectedPin = pins.find((pin) => pin.id === screen.id);
   const selectedBoard = boards.find((board) => board.id === screen.id);
 
@@ -56,6 +63,15 @@ export default function App() {
     setScreen({ name: "profile" });
   }
 
+  function openNotifications() {
+    openingRef.current = null;
+    pinningRef.current = null;
+    setOpeningId(null);
+    setPinningId(null);
+    setArriving(false);
+    setScreen({ name: "notifications" });
+  }
+
   function beginOpen(id) {
     if (openingRef.current || pinningRef.current) return;
     const reduce = window.matchMedia("(prefers-reduced-motion: reduce)").matches;
@@ -88,6 +104,12 @@ export default function App() {
     const timer = window.setTimeout(() => finishPin(pinningId), 1600);
     return () => window.clearTimeout(timer);
   }, [pinningId]);
+
+  function toggleLike(pinId) {
+    setLikedIds((current) =>
+      current.includes(pinId) ? current.filter((id) => id !== pinId) : [...current, pinId],
+    );
+  }
 
   function togglePinOnBoard(boardId, pinId) {
     setBoards((current) =>
@@ -139,6 +161,7 @@ export default function App() {
         section={section}
         onExplore={openExplore}
         onProfile={openProfile}
+        onNotifications={openNotifications}
         onCreate={() => setModal("pin")}
       />
       {screen.name === "explore" ? (
@@ -161,11 +184,14 @@ export default function App() {
           pin={selectedPin}
           boards={boards}
           arriving={arriving}
+          liked={selectedPin ? likedIds.includes(selectedPin.id) : false}
           onBack={openExplore}
           onToggle={togglePinOnBoard}
+          onLike={() => selectedPin && toggleLike(selectedPin.id)}
           onCreateBoard={() => setModal("board")}
         />
       ) : null}
+      {screen.name === "notifications" ? <NotificationsView /> : null}
       {screen.name === "profile" ? (
         <ProfileView
           boards={boards}

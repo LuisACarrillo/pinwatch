@@ -1,6 +1,15 @@
 import HealthStatus from "./HealthStatus.jsx";
 
-export default function Masthead({ section, onExplore, onProfile, onCreate }) {
+function BellIcon() {
+  return (
+    <svg className="icon" viewBox="0 0 24 24" aria-hidden="true">
+      <path d="M6 9a6 6 0 0 1 12 0c0 4.5.8 6.2 1.6 7.2.3.4.4.8.4 1.3H4c0-.5.1-.9.4-1.3C5.2 15.2 6 13.5 6 9z" />
+      <path d="M10 19.5a2 2 0 0 0 4 0" />
+    </svg>
+  );
+}
+
+export default function Masthead({ section, onExplore, onProfile, onNotifications, onCreate }) {
   return (
     <header className="mast">
       <span className="tack" aria-hidden="true" />
@@ -29,7 +38,17 @@ export default function Masthead({ section, onExplore, onProfile, onCreate }) {
           Nuevo
         </button>
       </nav>
-      <HealthStatus />
+      <div className="mast-end">
+        <button
+          type="button"
+          className={section === "notifications" ? "mast-bell is-current" : "mast-bell"}
+          aria-label="Notificaciones"
+          onClick={onNotifications}
+        >
+          <BellIcon />
+        </button>
+        <HealthStatus />
+      </div>
     </header>
   );
 }

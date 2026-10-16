@@ -1,12 +1,22 @@
 import PinShot from "../components/PinShot.jsx";
 import SaveToBoard from "../components/SaveToBoard.jsx";
 
+function HeartIcon() {
+  return (
+    <svg className="icon" viewBox="0 0 24 24" aria-hidden="true">
+      <path d="M12 19.5s-6.5-4-6.5-8.2a3.6 3.6 0 0 1 6.5-2 3.6 3.6 0 0 1 6.5 2c0 4.2-6.5 8.2-6.5 8.2z" />
+    </svg>
+  );
+}
+
 export default function PinDetailView({
   pin,
   boards,
   arriving = false,
+  liked = false,
   onBack,
   onToggle,
+  onLike,
   onCreateBoard,
 }) {
   if (!pin) {
@@ -30,6 +40,17 @@ export default function PinDetailView({
         <p className="kicker">{pin.category}</p>
         <h2>{pin.title}</h2>
         <p className="quiet">{pin.description}</p>
+        <div className="pin-actions">
+          <button
+            type="button"
+            className={liked ? "like is-liked" : "like"}
+            aria-pressed={liked}
+            onClick={onLike}
+          >
+            <HeartIcon />
+            <span>Me gusta</span>
+          </button>
+        </div>
         <SaveToBoard
           boards={boards}
           pinId={pin.id}
