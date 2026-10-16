@@ -23,12 +23,14 @@ pinwatch/
 ├── infra/                    # Infraestructura como código y automatización
 │   ├── setup_originals_bucket.py # Bucket S3 de originales y CORS
 │   ├── secrets.sh            # Secreto en Secrets Manager (JWT y BD)
+│   ├── sns.sh                # Tópico Amazon SNS (pinwatch-events)
 │   ├── ec2.sh                # Bastión EC2 y Session Manager
 │   ├── rds.sh                # Amazon RDS PostgreSQL y migración de esquema
-│   ├── schema.sql            # Esquema relacional (users, pins, boards, board_pins)
+│   ├── schema.sql            # Esquema relacional (users, pins, boards, board_pins, notifications)
 │   ├── up.sh                 # Orquestador de infraestructura
 │   ├── verify.sh             # Comprobaciones end-to-end
 │   └── teardown.sh           # Limpieza de recursos
+
 ├── Makefile                  # Comandos rápidos: make up, make down, make status
 ├── start_backend.sh          # Script orquestador del backend e infra
 ├── .github/workflows/        # Pipelines de integración continua
@@ -84,9 +86,11 @@ Este script ejecuta automáticamente en el orden estricto necesario:
 1. Valida la sesión activa de AWS en `us-east-1`.
 2. `python3 infra/setup_originals_bucket.py`: crea o verifica el bucket S3 `pinwatch-originals-<cuenta>` y aplica su política CORS.
 3. `bash infra/secrets.sh up`: genera y configura el secreto `pinwatch/app` en AWS Secrets Manager con llaves JWT aleatorias.
-4. `bash infra/ec2.sh up`: levanta el bastión EC2 `pinwatch-bastion` (`t3.micro`) con SSM y cliente `psql`.
-5. `bash infra/rds.sh up`: aprovisiona la instancia Amazon RDS PostgreSQL (`pinwatch-db`), DB Subnet Group y Security Group (`pinwatch-db-sg`), actualiza `pinwatch/app` con `db_host`, `db_port`, `db_name`, `db_username`, `db_password`, y aplica `infra/schema.sql` a través del bastión.
-6. Prepara el entorno virtual de Python (`.venv` o `~/pinwatch-venv`), instala las dependencias de `backend/requirements.txt` y levanta el servidor Uvicorn en modo reload.
+4. `bash infra/sns.sh up`: crea o verifica el tópico Amazon SNS `pinwatch-events` y registra `sns_topic_arn` en Secrets Manager.
+5. `bash infra/ec2.sh up`: levanta el bastión EC2 `pinwatch-bastion` (`t3.micro`) con SSM y cliente `psql`.
+6. `bash infra/rds.sh up`: aprovisiona la instancia Amazon RDS PostgreSQL (`pinwatch-db`), DB Subnet Group y Security Group (`pinwatch-db-sg`), actualiza `pinwatch/app` con `db_host`, `db_port`, `db_name`, `db_username`, `db_password`, y aplica `infra/schema.sql` a través del bastión.
+7. Prepara el entorno virtual de Python (`.venv` o `~/pinwatch-venv`), instala las dependencias de `backend/requirements.txt` y levanta el servidor Uvicorn en modo reload.
+
 
 La API quedará disponible de inmediato:
 - Salud local: [http://localhost:8000/health](http://localhost:8000/health)

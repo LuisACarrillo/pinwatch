@@ -72,6 +72,18 @@ else
   log "AVISO  RDS pinwatch-db no encontrada (ejecuta 'bash infra/rds.sh up' para levantarla)"
 fi
 
+# 6. Tópico Amazon SNS existente
+sns_arn="$(aws sns list-topics \
+  --query "Topics[?ends_with(TopicArn, ':pinwatch-events')].TopicArn" \
+  --output text 2>/dev/null | grep -v '^None$' || true)"
+if [[ -n "$sns_arn" ]]; then
+  pass "Tópico Amazon SNS pinwatch-events existe: $sns_arn"
+else
+  log "AVISO  Tópico SNS pinwatch-events no encontrado (ejecuta 'bash infra/sns.sh up' para crearlo)"
+fi
+
 ((FAILURES == 0)) || die "$FAILURES verificación(es) fallaron."
 log "Todo funciona."
+
+
 
