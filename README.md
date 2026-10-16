@@ -298,6 +298,7 @@ Los scripts leen la cuenta y la región de la sesión de la AWS CLI; las variabl
 [verify] OK     start-session funciona; en el bastión: psql (PostgreSQL) 16.x
 [verify] OK     Security group sin reglas de entrada
 [verify] OK     RDS pinwatch-db en available: pinwatch-db.xxxxxxxx.us-east-1.rds.amazonaws.com
+[verify] OK     Esquema completo en la RDS (29 columnas; pins con status, processed_key y thumbnail_key)
 [verify] OK     Tópico Amazon SNS pinwatch-events existe: arn:aws:sns:us-east-1:<cuenta>:pinwatch-events
 [verify] Subidos originals/verify-<ts>/prueba.png y originals/verify-<ts>/falsa.jpg; esperando a la Lambda (hasta 90 s)
 [verify] OK     Imagen válida procesada: processed/ y thumbnails/ en pinwatch-processed-<cuenta> (miniatura: image/webp 1290 bytes)
