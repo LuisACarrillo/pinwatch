@@ -1,8 +1,11 @@
 import { useEffect, useRef, useState } from "react";
+import { useAuth } from "./auth/AuthContext.jsx";
 import CreateBoardModal from "./components/CreateBoardModal.jsx";
 import CreatePinModal from "./components/CreatePinModal.jsx";
 import Masthead from "./components/Masthead.jsx";
 import { categories, initialBoards, initialPins, noteLooks } from "./data/catalog.js";
+import { createBoard as postBoard } from "./services/api.js";
+import AuthView from "./views/AuthView.jsx";
 import BoardView from "./views/BoardView.jsx";
 import ExploreView from "./views/ExploreView.jsx";
 import NotificationsView from "./views/NotificationsView.jsx";
@@ -10,6 +13,7 @@ import PinDetailView from "./views/PinDetailView.jsx";
 import ProfileView from "./views/ProfileView.jsx";
 
 export default function App() {
+  const { user, status, loginRequired, acknowledgeLogin, logout } = useAuth();
   const [pins, setPins] = useState(initialPins);
   const [boards, setBoards] = useState(initialBoards);
   const [screen, setScreen] = useState({ name: "explore" });
@@ -28,7 +32,9 @@ export default function App() {
       ? "profile"
       : screen.name === "notifications"
         ? "notifications"
-        : "explore";
+        : screen.name === "auth"
+          ? ""
+          : "explore";
   const selectedPin = pins.find((pin) => pin.id === screen.id);
   const selectedBoard = boards.find((board) => board.id === screen.id);
 
@@ -64,6 +70,7 @@ export default function App() {
   }
 
   function openNotifications() {
+    if (!requireUser()) return;
     openingRef.current = null;
     pinningRef.current = null;
     setOpeningId(null);
@@ -91,6 +98,32 @@ export default function App() {
     setOpeningId(null);
     setArriving(true);
     setScreen({ name: "pin", id });
+  }
+
+  useEffect(() => {
+    if (!loginRequired) return;
+    acknowledgeLogin();
+    setModal(null);
+    setScreen((current) => (current.name === "auth" ? current : { name: "auth", mode: "login" }));
+  }, [loginRequired, acknowledgeLogin]);
+
+  function openAuth(mode = "login") {
+    openingRef.current = null;
+    pinningRef.current = null;
+    setOpeningId(null);
+    setPinningId(null);
+    setArriving(false);
+    setModal(null);
+    setScreen({ name: "auth", mode });
+  }
+
+  function requireUser() {
+    if (status === "checking") return false;
+    if (!user) {
+      openAuth("login");
+      return false;
+    }
+    return true;
   }
 
   useEffect(() => {
@@ -126,10 +159,10 @@ export default function App() {
     );
   }
 
-  function createPin({ title, description, category: pinCategory, file, objectKey }) {
+  function createPin({ id, title, description, category: pinCategory, file, objectKey }) {
     const look = noteLooks[pins.length % noteLooks.length];
     const pin = {
-      id: crypto.randomUUID(),
+      id: id ?? crypto.randomUUID(),
       title,
       description,
       category: pinCategory,
@@ -143,11 +176,12 @@ export default function App() {
     setScreen({ name: "pin", id: pin.id });
   }
 
-  function createBoard({ name, description }) {
+  async function createBoard({ name, description }) {
+    const created = await postBoard({ name, description });
     const board = {
-      id: crypto.randomUUID(),
-      name,
-      description,
+      id: created.id,
+      name: created.name,
+      description: created.description,
       pinIds: [],
     };
     setBoards((current) => [...current, board]);
@@ -155,14 +189,24 @@ export default function App() {
     setScreen({ name: "board", id: board.id });
   }
 
+  function signOut() {
+    logout();
+    if (screen.name === "notifications" || screen.name === "auth") openExplore();
+  }
+
   return (
     <div className="cork">
       <Masthead
         section={section}
+        user={user}
         onExplore={openExplore}
         onProfile={openProfile}
         onNotifications={openNotifications}
-        onCreate={() => setModal("pin")}
+        onCreate={() => {
+          if (requireUser()) setModal("pin");
+        }}
+        onLogin={() => openAuth("login")}
+        onLogout={signOut}
       />
       {screen.name === "explore" ? (
         <ExploreView
@@ -188,15 +232,27 @@ export default function App() {
           onBack={openExplore}
           onToggle={togglePinOnBoard}
           onLike={() => selectedPin && toggleLike(selectedPin.id)}
-          onCreateBoard={() => setModal("board")}
+          onCreateBoard={() => {
+            if (requireUser()) setModal("board");
+          }}
         />
       ) : null}
       {screen.name === "notifications" ? <NotificationsView /> : null}
+      {screen.name === "auth" ? (
+        <AuthView
+          mode={screen.mode === "register" ? "register" : "login"}
+          onMode={(mode) => setScreen({ name: "auth", mode })}
+          onDone={openExplore}
+        />
+      ) : null}
       {screen.name === "profile" ? (
         <ProfileView
+          user={user}
           boards={boards}
           onOpen={(id) => setScreen({ name: "board", id })}
-          onCreate={() => setModal("board")}
+          onCreate={() => {
+            if (requireUser()) setModal("board");
+          }}
         />
       ) : null}
       {screen.name === "board" ? (

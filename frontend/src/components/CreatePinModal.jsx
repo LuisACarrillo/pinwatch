@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from "react";
-import { requestPresignedUpload, uploadOriginal } from "../services/api.js";
+import { createPin, requestPresignedUpload, uploadOriginal } from "../services/api.js";
 
 export default function CreatePinModal({ categories, onClose, onCreate }) {
   const [title, setTitle] = useState("");
@@ -64,8 +64,15 @@ export default function CreatePinModal({ categories, onClose, onCreate }) {
         contentType,
       });
       await uploadOriginal(presign.url, file, presign.content_type);
+      const created = await createPin({
+        title: trimmed,
+        description: description.trim(),
+        category,
+        objectKey: presign.key,
+      });
       if (!alive.current) return;
       onCreate({
+        id: created.id,
         title: trimmed,
         description: description.trim(),
         category,

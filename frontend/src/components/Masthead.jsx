@@ -9,7 +9,16 @@ function BellIcon() {
   );
 }
 
-export default function Masthead({ section, onExplore, onProfile, onNotifications, onCreate }) {
+export default function Masthead({
+  section,
+  user,
+  onExplore,
+  onProfile,
+  onNotifications,
+  onCreate,
+  onLogin,
+  onLogout,
+}) {
   return (
     <header className="mast">
       <span className="tack" aria-hidden="true" />
@@ -39,6 +48,18 @@ export default function Masthead({ section, onExplore, onProfile, onNotification
         </button>
       </nav>
       <div className="mast-end">
+        {user ? (
+          <>
+            <span className="mast-user">{user.username}</span>
+            <button type="button" className="text-action" onClick={onLogout}>
+              Salir
+            </button>
+          </>
+        ) : (
+          <button type="button" onClick={onLogin}>
+            Entrar
+          </button>
+        )}
         <button
           type="button"
           className={section === "notifications" ? "mast-bell is-current" : "mast-bell"}

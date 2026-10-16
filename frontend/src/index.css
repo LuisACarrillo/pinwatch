@@ -122,6 +122,27 @@ h3 {
   margin-left: auto;
 }
 
+.mast-user {
+  max-width: 9rem;
+  overflow: hidden;
+  font-weight: 600;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.auth-switch {
+  margin: 14px 0 0;
+}
+
+.notice-list {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
 .mast-bell {
   display: inline-flex;
   align-items: center;

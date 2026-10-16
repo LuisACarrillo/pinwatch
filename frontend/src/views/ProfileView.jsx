@@ -1,8 +1,8 @@
-export default function ProfileView({ boards, onOpen, onCreate }) {
+export default function ProfileView({ user, boards, onOpen, onCreate }) {
   return (
     <div className="page">
       <div className="page-head">
-        <h2>Tus tableros</h2>
+        <h2>{user ? `Tableros de ${user.username}` : "Tus tableros"}</h2>
       </div>
       <div className="notes">
         {boards.map((board, index) => (

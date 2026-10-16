@@ -4,27 +4,35 @@ export default function CreateBoardModal({ onClose, onCreate }) {
   const [name, setName] = useState("");
   const [description, setDescription] = useState("");
   const [error, setError] = useState("");
+  const [submitting, setSubmitting] = useState(false);
 
   useEffect(() => {
     function onKey(event) {
-      if (event.key === "Escape") onClose();
+      if (event.key === "Escape" && !submitting) onClose();
     }
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
-  }, [onClose]);
+  }, [onClose, submitting]);
 
-  function onSubmit(event) {
+  async function onSubmit(event) {
     event.preventDefault();
     const trimmed = name.trim();
     if (!trimmed) {
       setError("Escribe un nombre.");
       return;
     }
-    onCreate({ name: trimmed, description: description.trim() });
+    setSubmitting(true);
+    setError("");
+    try {
+      await onCreate({ name: trimmed, description: description.trim() });
+    } catch (createError) {
+      setError(createError.message);
+      setSubmitting(false);
+    }
   }
 
   return (
-    <div className="modal-back" onClick={onClose}>
+    <div className="modal-back" onClick={submitting ? undefined : onClose}>
       <form
         className="sheet"
         role="dialog"
@@ -55,11 +63,11 @@ export default function CreateBoardModal({ onClose, onCreate }) {
         </label>
         {error ? <p className="form-error">{error}</p> : null}
         <div className="form-actions">
-          <button type="button" className="text-action" onClick={onClose}>
+          <button type="button" className="text-action" onClick={onClose} disabled={submitting}>
             Cancelar
           </button>
-          <button type="submit" className="is-current">
-            Crear
+          <button type="submit" className="is-current" disabled={submitting}>
+            {submitting ? "Creando…" : "Crear"}
           </button>
         </div>
       </form>
