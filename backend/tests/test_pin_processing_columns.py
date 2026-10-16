@@ -11,10 +11,13 @@ ORIGINAL = "originals/abc/atardecer.jpg"
 
 
 def create_pin(client, object_key=ORIGINAL):
-    user = client.post("/users", json={"username": "flujo2", "email": "flujo2@example.com"}).json()
+    token = client.post(
+        "/auth/register", json={"username": "flujo2", "email": "flujo2@example.com", "password": "contrasena-segura"}
+    ).json()["access_token"]
     response = client.post(
         "/pins",
-        json={"user_id": user["id"], "title": "Atardecer", "category": "photography", "object_key": object_key},
+        json={"title": "Atardecer", "category": "photography", "object_key": object_key},
+        headers={"Authorization": f"Bearer {token}"},
     )
     assert response.status_code == 201
     return response.json()

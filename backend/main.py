@@ -9,12 +9,14 @@ from uuid import uuid4
 import boto3
 from botocore.config import Config
 from botocore.exceptions import BotoCoreError, ClientError
-from fastapi import FastAPI, HTTPException, Query, status
+from fastapi import Depends, FastAPI, HTTPException, Query, status
 from fastapi.middleware.cors import CORSMiddleware
 from mangum import Mangum
 from pydantic import BaseModel, Field, field_validator
 
 from app_secrets import SecretError
+from auth import CurrentUser, get_current_user
+from auth import router as auth_router
 from image_processor.keys import InvalidImage, output_keys
 import database
 import image_events
@@ -36,6 +38,8 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+app.include_router(auth_router)
 
 
 @app.get("/health")
@@ -83,12 +87,6 @@ class PresignUrl(BaseModel):
     content_type: str
 
 
-class UserCreate(BaseModel):
-    username: str = Field(min_length=1, max_length=50)
-    email: str = Field(min_length=3, max_length=255)
-    password_hash: str = Field(default="hash_placeholder", max_length=255)
-
-
 class UserResponse(BaseModel):
     id: str
     username: str
@@ -97,7 +95,6 @@ class UserResponse(BaseModel):
 
 
 class PinCreate(BaseModel):
-    user_id: str = Field(min_length=1, max_length=36)
     title: str = Field(min_length=1, max_length=200)
     description: str = Field(default="", max_length=2000)
     category: str = Field(min_length=1, max_length=80)
@@ -142,7 +139,6 @@ class NotificationResponse(BaseModel):
 
 
 class BoardCreate(BaseModel):
-    user_id: str = Field(min_length=1, max_length=36)
     name: str = Field(min_length=1, max_length=100)
     description: str = Field(default="", max_length=1000)
 
@@ -221,7 +217,7 @@ def s3_client():
 
 
 @app.post("/pins/presign-url", response_model=PresignUrl)
-def presign_pin_upload(pin: PresignPin) -> PresignUrl:
+def presign_pin_upload(pin: PresignPin, current_user: CurrentUser = Depends(get_current_user)) -> PresignUrl:
     key = object_key(pin.filename)
     try:
         url = s3_client().generate_presigned_url(
@@ -243,39 +239,8 @@ def presign_pin_upload(pin: PresignPin) -> PresignUrl:
 
 
 # ============================================================================
-# Usuarios (Auxiliar para integridad referencial en tablas dependientes)
+# Usuarios (el registro y el login están en auth.py: /auth/register, /auth/login, /auth/me)
 # ============================================================================
-
-
-@app.post("/users", response_model=UserResponse, status_code=status.HTTP_201_CREATED)
-def create_user(user: UserCreate) -> dict[str, Any]:
-    user_id = str(uuid4())
-    now = datetime.now(timezone.utc)
-    try:
-        with database.get_db() as conn:
-            with conn.cursor() as cur:
-                # Comprobar si ya existe por username o email
-                cur.execute(
-                    "SELECT id, username, email, created_at FROM users WHERE username = %s OR email = %s;",
-                    (user.username, user.email),
-                )
-                existing = cur.fetchone()
-                if existing:
-                    return dict(existing)
-
-                cur.execute(
-                    """
-                    INSERT INTO users (id, username, email, password_hash, created_at)
-                    VALUES (%s, %s, %s, %s, %s)
-                    RETURNING id, username, email, created_at;
-                    """,
-                    (user_id, user.username, user.email, user.password_hash, now),
-                )
-                return dict(cur.fetchone())
-    except SecretError as err:
-        raise HTTPException(status_code=503, detail=str(err)) from err
-    except Exception as err:
-        raise HTTPException(status_code=500, detail=f"Error al registrar usuario: {err}") from err
 
 
 @app.get("/users/{user_id}", response_model=UserResponse)
@@ -300,7 +265,7 @@ def get_user(user_id: str) -> dict[str, Any]:
 
 
 @app.post("/pins", response_model=PinResponse, status_code=status.HTTP_201_CREATED)
-def create_pin(pin: PinCreate) -> dict[str, Any]:
+def create_pin(pin: PinCreate, current_user: CurrentUser = Depends(get_current_user)) -> dict[str, Any]:
     pin_id = str(uuid4())
     now = datetime.now(timezone.utc)
     # Las mismas llaves que escribe la Lambda del Flujo 2; existen en S3 cuando status es processed.
@@ -321,7 +286,7 @@ def create_pin(pin: PinCreate) -> dict[str, Any]:
                     """,
                     (
                         pin_id,
-                        pin.user_id,
+                        current_user.id,
                         pin.title,
                         pin.description,
                         pin.category,
@@ -442,7 +407,7 @@ def get_pin(pin_id: str) -> dict[str, Any]:
 
 
 @app.post("/pins/{pin_id}/like", response_model=LikeResponse)
-def like_pin(pin_id: str) -> LikeResponse:
+def like_pin(pin_id: str, current_user: CurrentUser = Depends(get_current_user)) -> LikeResponse:
     """Registra un like en el pin, crea una notificación para su dueño y emite un evento SNS."""
     notification_id = str(uuid4())
     now = datetime.now(timezone.utc)
@@ -500,10 +465,10 @@ def like_pin(pin_id: str) -> LikeResponse:
 
 @app.get("/notifications", response_model=list[NotificationResponse])
 def get_notifications(
-    user_id: str = Query(..., description="ID del usuario a consultar"),
     limit: int = Query(50, ge=1, le=100),
+    current_user: CurrentUser = Depends(get_current_user),
 ) -> list[NotificationResponse]:
-    """Consulta las notificaciones de un usuario."""
+    """Consulta las notificaciones del usuario del token."""
     try:
         with database.get_db() as conn:
             with conn.cursor() as cur:
@@ -515,7 +480,7 @@ def get_notifications(
                     ORDER BY created_at DESC
                     LIMIT %s;
                     """,
-                    (user_id, limit),
+                    (current_user.id, limit),
                 )
                 rows = cur.fetchall()
                 return [NotificationResponse(**row) for row in rows]
@@ -528,8 +493,19 @@ def get_notifications(
 # ============================================================================
 
 
+def _require_board_owner(cur, board_id: str, user_id: str) -> dict[str, Any]:
+    """Devuelve el tablero si es de user_id; 404 si no existe y 403 si es de otro usuario."""
+    cur.execute("SELECT id, user_id, name, description, created_at FROM boards WHERE id = %s;", (board_id,))
+    board = cur.fetchone()
+    if not board:
+        raise HTTPException(status_code=404, detail="Tablero no encontrado.")
+    if board["user_id"] != user_id:
+        raise HTTPException(status_code=403, detail="Solo el dueño puede modificar este tablero.")
+    return board
+
+
 @app.post("/boards", response_model=BoardResponse, status_code=status.HTTP_201_CREATED)
-def create_board(board: BoardCreate) -> dict[str, Any]:
+def create_board(board: BoardCreate, current_user: CurrentUser = Depends(get_current_user)) -> dict[str, Any]:
     board_id = str(uuid4())
     now = datetime.now(timezone.utc)
     try:
@@ -541,7 +517,7 @@ def create_board(board: BoardCreate) -> dict[str, Any]:
                     VALUES (%s, %s, %s, %s, %s)
                     RETURNING id, user_id, name, description, created_at;
                     """,
-                    (board_id, board.user_id, board.name, board.description, now),
+                    (board_id, current_user.id, board.name, board.description, now),
                 )
                 row = cur.fetchone()
                 result = dict(row)
@@ -632,14 +608,13 @@ def get_board(board_id: str) -> dict[str, Any]:
 
 
 @app.put("/boards/{board_id}", response_model=BoardResponse)
-def update_board(board_id: str, board_update: BoardUpdate) -> dict[str, Any]:
+def update_board(
+    board_id: str, board_update: BoardUpdate, current_user: CurrentUser = Depends(get_current_user)
+) -> dict[str, Any]:
     try:
         with database.get_db() as conn:
             with conn.cursor() as cur:
-                cur.execute("SELECT id, user_id, name, description, created_at FROM boards WHERE id = %s;", (board_id,))
-                current = cur.fetchone()
-                if not current:
-                    raise HTTPException(status_code=404, detail="Tablero no encontrado.")
+                current = _require_board_owner(cur, board_id, current_user.id)
 
                 new_name = board_update.name if board_update.name is not None else current["name"]
                 new_desc = board_update.description if board_update.description is not None else current["description"]
@@ -665,14 +640,12 @@ def update_board(board_id: str, board_update: BoardUpdate) -> dict[str, Any]:
 
 
 @app.delete("/boards/{board_id}")
-def delete_board(board_id: str) -> dict[str, Any]:
+def delete_board(board_id: str, current_user: CurrentUser = Depends(get_current_user)) -> dict[str, Any]:
     try:
         with database.get_db() as conn:
             with conn.cursor() as cur:
-                cur.execute("DELETE FROM boards WHERE id = %s RETURNING id;", (board_id,))
-                deleted = cur.fetchone()
-                if not deleted:
-                    raise HTTPException(status_code=404, detail="Tablero no encontrado.")
+                _require_board_owner(cur, board_id, current_user.id)
+                cur.execute("DELETE FROM boards WHERE id = %s;", (board_id,))
                 return {"message": "Tablero eliminado exitosamente.", "id": board_id}
     except HTTPException:
         raise
@@ -681,23 +654,25 @@ def delete_board(board_id: str) -> dict[str, Any]:
 
 
 @app.post("/boards/{board_id}/pins")
-def add_pin_to_board_post(board_id: str, payload: AddPinToBoard) -> dict[str, Any]:
-    return _add_pin_to_board(board_id, payload.pin_id)
+def add_pin_to_board_post(
+    board_id: str, payload: AddPinToBoard, current_user: CurrentUser = Depends(get_current_user)
+) -> dict[str, Any]:
+    return _add_pin_to_board(board_id, payload.pin_id, current_user.id)
 
 
 @app.post("/boards/{board_id}/pins/{pin_id}")
-def add_pin_to_board_param(board_id: str, pin_id: str) -> dict[str, Any]:
-    return _add_pin_to_board(board_id, pin_id)
+def add_pin_to_board_param(
+    board_id: str, pin_id: str, current_user: CurrentUser = Depends(get_current_user)
+) -> dict[str, Any]:
+    return _add_pin_to_board(board_id, pin_id, current_user.id)
 
 
-def _add_pin_to_board(board_id: str, pin_id: str) -> dict[str, Any]:
+def _add_pin_to_board(board_id: str, pin_id: str, user_id: str) -> dict[str, Any]:
     now = datetime.now(timezone.utc)
     try:
         with database.get_db() as conn:
             with conn.cursor() as cur:
-                cur.execute("SELECT id FROM boards WHERE id = %s;", (board_id,))
-                if not cur.fetchone():
-                    raise HTTPException(status_code=404, detail="Tablero no encontrado.")
+                _require_board_owner(cur, board_id, user_id)
 
                 cur.execute("SELECT id FROM pins WHERE id = %s;", (pin_id,))
                 if not cur.fetchone():
@@ -730,10 +705,13 @@ def _add_pin_to_board(board_id: str, pin_id: str) -> dict[str, Any]:
 
 
 @app.delete("/boards/{board_id}/pins/{pin_id}")
-def remove_pin_from_board(board_id: str, pin_id: str) -> dict[str, Any]:
+def remove_pin_from_board(
+    board_id: str, pin_id: str, current_user: CurrentUser = Depends(get_current_user)
+) -> dict[str, Any]:
     try:
         with database.get_db() as conn:
             with conn.cursor() as cur:
+                _require_board_owner(cur, board_id, current_user.id)
                 cur.execute(
                     "DELETE FROM board_pins WHERE board_id = %s AND pin_id = %s RETURNING pin_id;",
                     (board_id, pin_id),
