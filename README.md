@@ -36,11 +36,13 @@ pinwatch/
 │   ├── web.sh                # Frontend estático en S3 apuntando a esa API
 │   ├── up.sh                 # Orquestador de infraestructura
 │   ├── verify.sh             # Comprobaciones end-to-end
+│   ├── smoke_flujo2.sh       # Prueba de humo del Flujo 2 (la corre el CI/CD tras desplegar)
+│   ├── ci_credentials.sh     # Copia las credenciales del lab a los secretos de GitHub
 │   └── teardown.sh           # Limpieza de recursos
 
 ├── Makefile                  # Comandos rápidos: make up, make down, make status
 ├── start_backend.sh          # Script orquestador del backend e infra
-├── .github/workflows/        # Pipelines de integración continua
+├── .github/workflows/        # CI/CD: pytest en cada PR y despliegue al integrar en main
 ├── package.json              # Scripts del workspace pnpm
 └── pnpm-workspace.yaml
 ```
@@ -51,7 +53,7 @@ pinwatch/
 | `frontend/` | Interfaz React. El formulario de un pin pide la URL firmada y sube la imagen directo al bucket. |
 | `infra/` | Scripts de infraestructura (S3, Secrets Manager, Bastión EC2, RDS PostgreSQL y esquema SQL). |
 | `Makefile` / `start_backend.sh` | Levanta toda la infraestructura en orden y arranca la API del backend. |
-| `.github/workflows/` | Definiciones de CI. El directorio queda reservado para los pipelines del equipo. |
+| `.github/workflows/` | `ci-cd.yml`: corre `pytest` en cada pull request y, al integrar en `main`, despliega en AWS. Ver [CI/CD](#cicd-con-github-actions). |
 
 ## Requisitos
 
@@ -155,6 +157,36 @@ pnpm build
 pnpm lint
 pnpm preview
 ```
+
+## CI/CD con GitHub Actions
+
+El workflow `.github/workflows/ci-cd.yml` tiene dos jobs:
+
+| Job | Cuándo corre | Qué hace |
+| --- | --- | --- |
+| **Pruebas del backend (pytest)** | En cada pull request hacia `main` y en cada push a `main` | Instala `backend/requirements-dev.txt` en Python 3.14 (el runtime de las Lambdas) y corre `pytest` sobre `backend/tests/`. No toca AWS: usa credenciales falsas, moto y SQLite. Deja una tabla con el resultado en el resumen de la corrida. |
+| **Despliegue en AWS (Learner Lab)** | Solo en push a `main` (al hacer merge de un PR) o a mano con *Run workflow*, y solo si las pruebas pasaron | Con las credenciales del Learner Lab corre `bash infra/image_processor.sh up` (bucket processed, Lambda del Flujo 2 y trigger de S3) y luego `bash infra/smoke_flujo2.sh`, que sube una imagen de prueba, espera la miniatura y borra todo. Queda registrado en *Deployments* como `aws-learner-lab`. |
+
+Dos despliegues nunca corren al mismo tiempo, y un push nuevo a un PR cancela la corrida anterior de ese PR.
+
+### Credenciales del Learner Lab
+
+El Learner Lab no deja crear usuarios de IAM ni el proveedor OIDC de GitHub, así que el pipeline usa las credenciales temporales de **AWS Details**, guardadas como secretos del repositorio (*Settings > Secrets and variables > Actions*):
+
+| Secreto | Valor en AWS Details |
+| --- | --- |
+| `AWS_ACCESS_KEY_ID` | `aws_access_key_id` |
+| `AWS_SECRET_ACCESS_KEY` | `aws_secret_access_key` |
+| `AWS_SESSION_TOKEN` | `aws_session_token` |
+
+Vencen con la sesión del lab (unas 4 horas). Antes de hacer merge a `main`, con el lab iniciado y las credenciales nuevas en `~/.aws/credentials`, se actualizan los tres de un jalón con [GitHub CLI](https://cli.github.com/):
+
+```bash
+gh auth login                 # solo la primera vez
+bash infra/ci_credentials.sh  # valida las credenciales y actualiza los tres secretos
+```
+
+Si el job de despliegue falla en *Credenciales del Learner Lab*, las credenciales vencieron: se actualizan y se vuelve a correr con *Re-run jobs*.
 
 ## Infraestructura en AWS: S3, Secrets Manager, SNS, Bastión EC2, Amazon RDS y Flujo 2
 
