@@ -1,0 +1,146 @@
+# CI/CD de PinWatch
+#   - En cada pull request hacia main: corre pytest de backend/tests/.
+#   - Al integrar en main (push): vuelve a correr las pruebas y, si pasan, despliega en la
+#     cuenta del Learner Lab de Luis Fernando y prueba el Flujo 2 de punta a punta.
+#
+# Secretos del repositorio (Settings > Secrets and variables > Actions), sacados de
+# AWS Details del Learner Lab. Vencen con la sesión del lab (~4 h); se actualizan con
+# `bash infra/ci_credentials.sh`:
+#   AWS_ACCESS_KEY_ID, AWS_SECRET_ACCESS_KEY, AWS_SESSION_TOKEN
+name: CI/CD
+
+on:
+  pull_request:
+    branches: [main]
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+# En un PR, un push nuevo cancela la corrida anterior. En main nunca se cancela un deploy a medias.
+concurrency:
+  group: ci-cd-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+defaults:
+  run:
+    shell: bash
+
+env:
+  PYTHON_VERSION: "3.14" # el mismo runtime de las Lambdas
+
+jobs:
+  test:
+    name: Pruebas del backend (pytest)
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    env:
+      # Las pruebas no deben tocar AWS: S3, SNS y SQS van con moto y la base con SQLite.
+      # Credenciales falsas y buckets fijos para que nada intente leer la cuenta real.
+      AWS_ACCESS_KEY_ID: testing
+      AWS_SECRET_ACCESS_KEY: testing
+      AWS_REGION: us-east-1
+      AWS_DEFAULT_REGION: us-east-1
+      ORIGINALS_BUCKET: pinwatch-originals-ci
+      PROCESSED_BUCKET: pinwatch-processed-ci
+    steps:
+      - uses: actions/checkout@v6
+
+      - uses: actions/setup-python@v6
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          cache: pip
+          cache-dependency-path: |
+            backend/requirements.txt
+            backend/requirements-dev.txt
+            backend/image_processor/requirements.txt
+
+      - name: Instalar dependencias
+        working-directory: backend
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements-dev.txt
+
+      - name: Correr pytest
+        working-directory: backend
+        run: python -m pytest -v --junitxml=pytest-report.xml
+
+      - name: Resumen de pruebas
+        if: always()
+        working-directory: backend
+        run: |
+          [[ -f pytest-report.xml ]] || { echo "No se generó el reporte de pytest." >>"$GITHUB_STEP_SUMMARY"; exit 0; }
+          python - <<'EOF' >>"$GITHUB_STEP_SUMMARY"
+          import xml.etree.ElementTree as ET
+          root = ET.parse("pytest-report.xml").getroot()
+          suite = root if root.tag == "testsuite" else root.find("testsuite")
+          total, failures, errors, skipped = (int(suite.get(k, 0)) for k in ("tests", "failures", "errors", "skipped"))
+          passed = total - failures - errors - skipped
+          icon = "✅" if failures == 0 and errors == 0 else "❌"
+          print(f"## {icon} Pruebas del backend\n")
+          print("| Total | Pasaron | Fallaron | Errores | Omitidas | Tiempo |")
+          print("| --- | --- | --- | --- | --- | --- |")
+          print(f"| {total} | {passed} | {failures} | {errors} | {skipped} | {float(suite.get('time', 0)):.1f} s |")
+          EOF
+
+  deploy:
+    name: Despliegue en AWS (Learner Lab)
+    needs: test
+    if: github.ref == 'refs/heads/main' && (github.event_name == 'push' || github.event_name == 'workflow_dispatch')
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    # Queda registrado en la pestaña Deployments del repo (evidencia de cada despliegue).
+    environment: aws-learner-lab
+    concurrency:
+      group: deploy-aws
+      cancel-in-progress: false
+    env:
+      AWS_REGION: us-east-1
+    steps:
+      - uses: actions/checkout@v6
+
+      # image_processor.sh prueba el zip en local solo si python3 coincide con el runtime.
+      - uses: actions/setup-python@v6
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+
+      - name: Credenciales del Learner Lab
+        uses: aws-actions/configure-aws-credentials@v6
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-session-token: ${{ secrets.AWS_SESSION_TOKEN }}
+          aws-region: us-east-1
+
+      # ---------------------------------------------------------------------------------
+      # Parte de Luis Alberto: cuando su despliegue quede listo en infra/, se agrega aquí,
+      # antes del Flujo 2. Ejemplo:
+      #
+      # - name: Desplegar <lo de Luis Alberto>
+      #   run: bash infra/<su_script>.sh up
+      # ---------------------------------------------------------------------------------
+
+      - name: Desplegar Lambda del Flujo 2
+        run: bash infra/image_processor.sh up
+
+      - name: Prueba de humo del Flujo 2
+        run: bash infra/smoke_flujo2.sh
+
+      - name: Resumen del despliegue
+        if: always()
+        run: |
+          {
+            echo "## Despliegue en AWS"
+            echo
+            echo "- Commit: \`${GITHUB_SHA::7}\`"
+            echo "- Región: \`$AWS_REGION\`"
+            echo
+            echo "| Lambda | Estado | Última actualización | Runtime | Modificada |"
+            echo "| --- | --- | --- | --- | --- |"
+            aws lambda get-function-configuration --function-name pinwatch-image-processor \
+              --query '[FunctionName, State, LastUpdateStatus, Runtime, LastModified]' --output text 2>/dev/null |
+              awk -F'\t' '{ printf "| %s | %s | %s | %s | %s |\n", $1, $2, $3, $4, $5 }' ||
+              echo "| pinwatch-image-processor | no existe | | | |"
+          } >>"$GITHUB_STEP_SUMMARY"
