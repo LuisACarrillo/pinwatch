@@ -82,6 +82,8 @@ def main():
 
     bucket = f"pinwatch-originals-{account_id}"
     cors_file = Path(__file__).resolve().parent / "originals-cors.json"
+    # El navegador del sitio publicado hace PUT directo a este bucket.
+    website_origin = f"http://pinwatch-web-{account_id}.s3-website-{current_region}.amazonaws.com"
 
     exists = aws(
         "s3api",
@@ -131,16 +133,26 @@ def main():
         "--server-side-encryption-configuration",
         "Rules=[{ApplyServerSideEncryptionByDefault={SSEAlgorithm=AES256}}]",
     )
-    aws(
-        "s3api",
-        "put-bucket-cors",
-        "--bucket",
-        bucket,
-        "--region",
-        current_region,
-        "--cors-configuration",
-        f"file://{cors_file.as_posix()}",
-    )
+    cors = json.loads(cors_file.read_text(encoding="utf-8"))
+    origins = cors["CORSRules"][0]["AllowedOrigins"]
+    if website_origin not in origins:
+        origins.append(website_origin)
+    with tempfile.NamedTemporaryFile("w", suffix=".json", delete=False) as cors_out:
+        json.dump(cors, cors_out)
+        cors_path = cors_out.name
+    try:
+        aws(
+            "s3api",
+            "put-bucket-cors",
+            "--bucket",
+            bucket,
+            "--region",
+            current_region,
+            "--cors-configuration",
+            f"file://{Path(cors_path).as_posix()}",
+        )
+    finally:
+        Path(cors_path).unlink(missing_ok=True)
 
     policy = {
         "Version": "2012-10-17",

@@ -32,6 +32,8 @@ pinwatch/
 │   ├── rds.sh                # Amazon RDS PostgreSQL y migración de esquema
 │   ├── schema.sql            # Esquema relacional (users, pins, boards, board_pins, notifications)
 │   ├── image_processor.sh    # Flujo 2: Lambda, trigger de S3 y bucket processed
+│   ├── api.sh                # API en Lambda, API Gateway, VPC y suscripción SNS
+│   ├── web.sh                # Frontend estático en S3 apuntando a esa API
 │   ├── up.sh                 # Orquestador de infraestructura
 │   ├── verify.sh             # Comprobaciones end-to-end
 │   └── teardown.sh           # Limpieza de recursos
@@ -95,7 +97,9 @@ Este script ejecuta automáticamente en el orden estricto necesario:
 5. `bash infra/ec2.sh up`: levanta el bastión EC2 `pinwatch-bastion` (`t3.micro`) con SSM y cliente `psql`.
 6. `bash infra/rds.sh up`: aprovisiona la instancia Amazon RDS PostgreSQL (`pinwatch-db`), DB Subnet Group y Security Group (`pinwatch-db-sg`), actualiza `pinwatch/app` con `db_host`, `db_port`, `db_name`, `db_username`, `db_password`, y aplica `infra/schema.sql` a través del bastión.
 7. `bash infra/image_processor.sh up`: crea el bucket `pinwatch-processed-<cuenta>`, despliega la Lambda del Flujo 2 y la conecta a `originals/` con una notificación de S3.
-8. Prepara el entorno virtual de Python (`.venv` o `~/pinwatch-venv`), instala las dependencias de `backend/requirements.txt` y levanta el servidor Uvicorn en modo reload.
+8. `bash infra/api.sh up`: publica la API en Lambda dentro de la VPC, con API Gateway HTTP y suscripción a `pinwatch-events`.
+9. `bash infra/web.sh up`: construye el frontend con la URL de esa API y lo publica en el bucket de sitio estático.
+10. Prepara el entorno virtual de Python (`.venv` o `~/pinwatch-venv`), instala las dependencias de `backend/requirements.txt` y levanta el servidor Uvicorn en modo reload.
 
 
 La API quedará disponible de inmediato:
@@ -166,14 +170,18 @@ Todo se crea con la AWS CLI y scripts de bash en `infra/`. Cada script es idempo
 | EC2 | Security group `pinwatch-bastion-sg` | Sin reglas de entrada. Se entra por Session Manager, no por SSH. |
 | SNS | Tópico `pinwatch-events` | Eventos asíncronos de la aplicación (`pin.liked`, …). Su ARN queda en `pinwatch/app` como `sns_topic_arn`. |
 | RDS | Instancia `pinwatch-db` (`db.t3.micro`, PostgreSQL 16) | Base de datos relacional para usuarios, pines, tableros y asociaciones. |
-| EC2 / RDS | Security group `pinwatch-db-sg` | Acepta conexiones en el puerto 5432 únicamente desde `pinwatch-bastion-sg`. |
+| EC2 / RDS | Security group `pinwatch-db-sg` | Acepta conexiones en el puerto 5432 desde `pinwatch-bastion-sg` y, cuando la API está publicada, desde `pinwatch-api-sg`. |
 | RDS | DB Subnet Group `pinwatch-db-subnet-group` | Agrupa subredes de la VPC en múltiples zonas de disponibilidad para alta compatibilidad en RDS. |
 | Lambda | `pinwatch-image-processor` (Python 3.14, x86_64, 1024 MB, `LabRole`) | Flujo 2: valida cada imagen nueva de `originals/`, genera la versión comprimida y la miniatura en WebP, y publica el resultado en `pinwatch-events`. Está fuera de la VPC y no toca la RDS. |
 | S3 | Notificación `pinwatch-image-processor` en `pinwatch-originals-<cuenta>` | Dispara la Lambda con `s3:ObjectCreated:*` solo en el prefijo `originals/`. Las demás notificaciones del bucket se conservan. |
 | S3 | Bucket `pinwatch-processed-<cuenta>` (privado, cifrado) | Resultado del Flujo 2: `processed/<uuid>/<nombre>.webp` (1600 px de ancho máximo) y `thumbnails/<uuid>/<nombre>.webp` (400 px). |
 | CloudWatch Logs | `/aws/lambda/pinwatch-image-processor` (retención de 7 días) | Una línea JSON por imagen: `imagen_procesada` o `imagen_rechazada` con el motivo. |
+| Lambda | `pinwatch-api` (Python 3.12, x86_64, 512 MB, `LabRole`, dentro de la VPC) | API FastAPI. También recibe `imagen_procesada` e `imagen_rechazada` y actualiza el pin. |
+| API Gateway | HTTP API `pinwatch-api` | Entrada HTTPS de la API. La ruta `$default` invoca la Lambda. |
+| VPC | Endpoint de gateway S3 y endpoints de interfaz de Secrets Manager y SNS | La Lambda, dentro de la VPC, lee el secreto, publica en SNS y firma URLs de S3 sin NAT. |
+| S3 | `pinwatch-web-<cuenta>` (sitio estático) | Frontend. `infra/web.sh` lo construye con `VITE_API_URL` apuntando a la API. |
 
-Costo: el bastión cobra solo mientras está prendido (~USD 0.015/h con su IP pública); su disco de 8 GB y el secreto cobran aunque esté apagado (~USD 0.64 y 0.40 al mes). La RDS `db.t3.micro` cobra ~USD 0.018/h prendida y sus 20 GB gp3 ~USD 2.30 al mes. La Lambda, S3, SNS y los logs cobran solo por uso (centavos en las pruebas). Con `teardown.sh` el costo queda en cero.
+Costo: el bastión cobra solo mientras está prendido (~USD 0.015/h con su IP pública); su disco de 8 GB y el secreto cobran aunque esté apagado (~USD 0.64 y 0.40 al mes). La RDS `db.t3.micro` cobra ~USD 0.018/h prendida y sus 20 GB gp3 ~USD 2.30 al mes. La Lambda, S3, SNS y los logs cobran solo por uso (centavos en las pruebas). Cada endpoint de interfaz cobra ~USD 0.01/h aunque el laboratorio esté apagado; `bash infra/api.sh down` los borra. Con `teardown.sh` el costo queda en cero.
 
 ### Requisitos previos
 
@@ -191,7 +199,7 @@ sudo dpkg -i /tmp/smp.deb
 
 ```bash
 make up                 # Levanta toda la infraestructura en orden y arranca la API
-make status             # Muestra qué existe (secreto, SNS, bastión, RDS y Flujo 2)
+make status             # Muestra qué existe (secreto, SNS, bastión, RDS, Flujo 2, API y sitio)
 make verify             # Comprueba que la infraestructura funciona de punta a punta
 make down               # Borra los recursos creados, incluida la RDS (pide confirmación)
 ```
@@ -200,7 +208,7 @@ Sin `make`, desde la raíz del repositorio en Ubuntu:
 
 ```bash
 bash infra/check_lab.sh          # 1. el lab permite lo necesario (no deja nada creado)
-bash infra/up.sh                 # 2. secreto, SNS, bastión, RDS y Flujo 2 (~10 min la primera vez por la RDS)
+bash infra/up.sh                 # 2. secreto, SNS, bastión, RDS, Flujo 2, API y sitio (~10 min la primera vez por la RDS)
 bash infra/verify.sh             # 3. comprueba que todo funciona (incluye subir una imagen de prueba)
 bash infra/teardown.sh --status  #    muestra qué existe, sin borrar
 bash infra/teardown.sh           # 4. borra todo, pide confirmación (--yes para no preguntar)
@@ -212,6 +220,8 @@ Cada script también se puede ejecutar y gestionar de forma individual (`down` a
 - `bash infra/ec2.sh up|status|down`
 - `bash infra/rds.sh up|status|down`
 - `bash infra/image_processor.sh up|status|down` (solo el Flujo 2; no toca la RDS ni los originales)
+- `bash infra/api.sh up|status|down` (API en Lambda, API Gateway, endpoints de VPC y suscripción SNS)
+- `bash infra/web.sh up|status|down` (sitio estático; `up` necesita la API ya publicada)
 - `bash infra/teardown.sh [--yes | --status]`
 
 
@@ -292,11 +302,7 @@ El zip se arma en WSL con los wheels `manylinux2014_x86_64` de Pillow para Pytho
    aws s3 presign s3://pinwatch-processed-<cuenta>/thumbnails/<uuid>/<nombre>.webp --expires-in 300
    ```
 
-**Pendiente para cuando la API se despliegue en Lambda:**
-- Hasta que alguien se suscriba al tópico, los pines se quedan en `pending`, aunque la miniatura ya exista en S3. Hay que suscribir la Lambda de la API a `pinwatch-events` con una política de filtro `{"event_type": ["imagen_procesada", "imagen_rechazada"]}` y darle permiso a SNS para invocarla.
-- El zip de la API tiene que incluir `backend/image_processor/keys.py`, que no tiene dependencias.
-- La API necesita estar en la VPC para llegar a la RDS. Desde ahí, sin salida a internet, necesita un endpoint de gateway de S3 (gratis) y endpoints de interfaz de Secrets Manager y SNS (USD 0.01/h por zona cada uno, ~USD 7.30 al mes por endpoint en una sola zona). Sin ellos, `app_secrets` y `sns.publish_event` se quedan esperando hasta que se agota el tiempo.
-- `pinwatch-processed-<cuenta>` es privado, así que el feed necesita URLs prefirmadas de lectura (`generate_presigned_url("get_object", ...)`) a partir de `thumbnail_key` para mostrar las miniaturas.
+**API y frontend en la nube.** `bash infra/api.sh up` empaqueta la API (incluido `image_processor/keys.py`), la deja en la VPC, abre el 5432 desde `pinwatch-api-sg`, crea el endpoint de gateway de S3 y los de interfaz de Secrets Manager y SNS en una sola zona, publica API Gateway y suscribe la Lambda a `pinwatch-events` con el filtro `event_type` = `imagen_procesada` o `imagen_rechazada`. Al terminar llama a `GET /feed` para comprobar que llega a la RDS. `bash infra/web.sh up` construye el frontend contra esa URL y lo sube a `pinwatch-web-<cuenta>`. El sitio es HTTP; la API es HTTPS. Las miniaturas siguen firmándose en la API con `thumbnail_url`.
 
 ### Variables de entorno
 
@@ -314,6 +320,8 @@ Los scripts leen la cuenta y la región de la sesión de la AWS CLI; las variabl
 | `LAMBDA_RUNTIME` | `python3.14` | Runtime de la Lambda del Flujo 2; el zip se arma para esa versión. |
 | `ORIGINALS_BUCKET`, `PROCESSED_BUCKET` | `pinwatch-originals-<cuenta>`, `pinwatch-processed-<cuenta>` | Buckets de entrada y salida del Flujo 2. La Lambda recibe `PROCESSED_BUCKET` como variable de entorno. |
 | `SNS_TOPIC_NAME` | `pinwatch-events` | Tópico donde la Lambda del Flujo 2 publica sus resultados; recibe su ARN como `SNS_TOPIC_ARN`. |
+| `API_RUNTIME` | `python3.12` | Runtime de la Lambda de la API. El zip se arma para esa versión. |
+| `CORS_ORIGINS` | vacío | Orígenes extra del frontend, separados por comas. `api.sh` pone la URL del sitio estático. |
 
 ### Verificar que funciona
 
