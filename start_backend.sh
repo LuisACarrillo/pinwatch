@@ -36,11 +36,19 @@ log "5/7 Amazon RDS PostgreSQL y esquema de base de datos"
 bash "$INFRA_DIR/rds.sh" up
 
 # 7. Flujo 2: Lambda de procesamiento de imágenes y trigger de S3 en originals/
-log "6/7 Flujo 2: procesamiento de imágenes"
+log "6/9 Flujo 2: procesamiento de imágenes"
 bash "$INFRA_DIR/image_processor.sh" up
 
-# 8. Preparación del entorno Python del backend
-log "7/7 Preparando entorno de ejecución Python y dependencias"
+# 8. API en Lambda + API Gateway, dentro de la VPC y suscrita al tópico.
+log "7/9 API en Lambda y API Gateway"
+bash "$INFRA_DIR/api.sh" up
+
+# 9. Frontend estático apuntando a esa API.
+log "8/9 Frontend estático"
+bash "$INFRA_DIR/web.sh" up
+
+# 10. Preparación del entorno Python del backend
+log "9/9 Preparando entorno de ejecución Python y dependencias"
 
 VENV_PATH=""
 if [[ -d "$ROOT_DIR/.venv" ]]; then

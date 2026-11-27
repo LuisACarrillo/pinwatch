@@ -31,12 +31,22 @@ app = FastAPI(
     version="0.2.0",
 )
 
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=[
+def cors_origins() -> list[str]:
+    """Orígenes del frontend. El sitio publicado llega en CORS_ORIGINS (coma-separado)."""
+    origins = [
         "http://localhost:5173",
         "http://127.0.0.1:5173",
-    ],
+    ]
+    for item in os.environ.get("CORS_ORIGINS", "").split(","):
+        origin = item.strip().rstrip("/")
+        if origin and origin not in origins:
+            origins.append(origin)
+    return origins
+
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=cors_origins(),
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
