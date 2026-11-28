@@ -19,9 +19,11 @@ log "4/5 Base de datos Amazon RDS"
 bash "$INFRA_DIR/rds.sh" up
 log "5/7 Flujo 2: procesamiento de imágenes"
 bash "$INFRA_DIR/image_processor.sh" up
-log "6/7 API en Lambda y API Gateway"
+log "6/8 API en Lambda y API Gateway"
 bash "$INFRA_DIR/api.sh" up
-log "7/7 Frontend estático"
+log "7/8 Frontend estático"
 bash "$INFRA_DIR/web.sh" up
+log "8/8 Monitoreo y métricas en CloudWatch"
+bash "$INFRA_DIR/monitoring.sh" up
 
 log "Todo arriba. Compruébalo con: bash infra/verify.sh"

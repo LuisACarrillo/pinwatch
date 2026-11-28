@@ -21,6 +21,7 @@ ASSUME_YES="${ASSUME_YES:-0}"
 
 aws_session
 
+bash "$INFRA_DIR/monitoring.sh" status
 bash "$INFRA_DIR/web.sh" status
 bash "$INFRA_DIR/api.sh" status
 bash "$INFRA_DIR/image_processor.sh" status
@@ -35,19 +36,21 @@ confirm "Se borrará todo lo anterior en la cuenta $ACCOUNT_ID. ¿Continuar?" ||
 # Orden: primero lo que depende de otros recursos. La notificación de S3 antes que la Lambda;
 # la RDS antes que el bastión (su security group referencia al del bastión); SNS y al final
 # los secretos, de los que leen todos los demás.
-log "1/7 Sitio del frontend"
+log "1/8 Monitoreo, alarmas y dashboard CloudWatch"
+bash "$INFRA_DIR/monitoring.sh" down --yes
+log "2/8 Sitio del frontend"
 bash "$INFRA_DIR/web.sh" down --yes
-log "2/7 API, Lambda y endpoints de VPC"
+log "3/8 API, Lambda y endpoints de VPC"
 bash "$INFRA_DIR/api.sh" down --yes
-log "3/7 Flujo 2: notificación, Lambda, logs y bucket processed"
+log "4/8 Flujo 2: notificación, Lambda, logs y bucket processed"
 bash "$INFRA_DIR/image_processor.sh" down --yes
-log "4/7 Base de datos Amazon RDS"
+log "5/8 Base de datos Amazon RDS"
 bash "$INFRA_DIR/rds.sh" down --yes
-log "5/7 Bastión EC2"
+log "6/8 Bastión EC2"
 bash "$INFRA_DIR/ec2.sh" down --yes
-log "6/7 Amazon SNS"
+log "7/8 Amazon SNS"
 bash "$INFRA_DIR/sns.sh" down --yes
-log "7/7 Secrets Manager"
+log "8/8 Secrets Manager"
 bash "$INFRA_DIR/secrets.sh" down --yes
 
 log "Teardown terminado."

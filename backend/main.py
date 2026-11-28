@@ -1,3 +1,4 @@
+import json
 import logging
 import math
 import os
@@ -24,6 +25,16 @@ import image_events
 import sns
 
 logger = logging.getLogger(__name__)
+
+
+def log_event(event_name: str, **fields: Any) -> None:
+    """Emite un log estructurado JSON para métricas y monitoreo en CloudWatch."""
+    logger.info(json.dumps({"event": event_name, **fields}, ensure_ascii=False, default=str))
+
+
+def log_error(event_name: str, **fields: Any) -> None:
+    """Emite un log estructurado JSON para captura de errores en CloudWatch."""
+    logger.error(json.dumps({"event": event_name, **fields}, ensure_ascii=False, default=str))
 
 app = FastAPI(
     title="PinWatch API",
@@ -355,11 +366,20 @@ def create_pin(pin: PinCreate, current_user: CurrentUser = Depends(get_current_u
                 )
                 row = cur.fetchone()
     except SecretError as err:
+        log_error("api_error", endpoint="create_pin", error=str(err))
         raise HTTPException(status_code=503, detail=str(err)) from err
     except Exception as err:
+        log_error("api_error", endpoint="create_pin", error=str(err))
         raise HTTPException(status_code=500, detail=f"Error al guardar pin: {err}") from err
 
     result = dict(row)
+    log_event(
+        "pin_created",
+        pin_id=result["id"],
+        user_id=result["user_id"],
+        title=result["title"],
+        category=result["category"],
+    )
     # Notificación asíncrona a SNS
     sns.publish_event(
         event_type="pin.created",
@@ -418,8 +438,10 @@ def get_feed(
 
                 rows = cur.fetchall()
     except SecretError as err:
+        log_error("api_error", endpoint="get_feed", error=str(err))
         raise HTTPException(status_code=503, detail=str(err)) from err
     except Exception as err:
+        log_error("api_error", endpoint="get_feed", error=str(err))
         raise HTTPException(status_code=500, detail=f"Error al consultar el feed: {err}") from err
 
     items = [PinResponse(**with_thumbnail_url(row)) for row in rows]
@@ -498,9 +520,18 @@ def like_pin(pin_id: str, current_user: CurrentUser = Depends(get_current_user))
     except HTTPException:
         raise
     except SecretError as err:
+        log_error("api_error", endpoint="like_pin", error=str(err))
         raise HTTPException(status_code=503, detail=str(err)) from err
     except Exception as err:
+        log_error("api_error", endpoint="like_pin", error=str(err))
         raise HTTPException(status_code=500, detail=f"Error al registrar like: {err}") from err
+
+    log_event(
+        "like_registered",
+        pin_id=pin["id"],
+        user_id=pin["user_id"],
+        likes_count=pin["likes_count"],
+    )
 
     # 3. Notificación asíncrona de eventos vía Amazon SNS
     sns.publish_event(
@@ -579,10 +610,18 @@ def create_board(board: BoardCreate, current_user: CurrentUser = Depends(get_cur
                 row = cur.fetchone()
                 result = dict(row)
                 result["pins_count"] = 0
+                log_event(
+                    "board_created",
+                    board_id=board_id,
+                    user_id=current_user.id,
+                    name=board.name,
+                )
                 return result
     except SecretError as err:
+        log_error("api_error", endpoint="create_board", error=str(err))
         raise HTTPException(status_code=503, detail=str(err)) from err
     except Exception as err:
+        log_error("api_error", endpoint="create_board", error=str(err))
         raise HTTPException(status_code=500, detail=f"Error al crear tablero: {err}") from err
 
 
@@ -746,7 +785,15 @@ def _add_pin_to_board(board_id: str, pin_id: str, user_id: str) -> dict[str, Any
     except HTTPException:
         raise
     except Exception as err:
+        log_error("api_error", endpoint="add_pin_to_board", error=str(err))
         raise HTTPException(status_code=500, detail=f"Error al agregar pin al tablero: {err}") from err
+
+    log_event(
+        "board_pin_added",
+        board_id=board_id,
+        pin_id=pin_id,
+        user_id=user_id,
+    )
 
     sns.publish_event(
         event_type="board.pin_added",
@@ -784,6 +831,7 @@ def remove_pin_from_board(
     except HTTPException:
         raise
     except Exception as err:
+        log_error("api_error", endpoint="remove_pin_from_board", error=str(err))
         raise HTTPException(status_code=500, detail=f"Error al remover pin del tablero: {err}") from err
 
 
