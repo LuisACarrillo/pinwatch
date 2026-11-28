@@ -1,7 +1,8 @@
 # CI/CD de PinWatch
 #   - En cada pull request hacia main: corre pytest de backend/tests/.
 #   - Al integrar en main (push): vuelve a correr las pruebas y, si pasan, despliega en la
-#     cuenta del Learner Lab de Luis Fernando y prueba el Flujo 2 de punta a punta.
+#     cuenta del Learner Lab de Luis Fernando: secreto, SNS, bastión, RDS, Flujo 2,
+#     la API y el sitio. Luego prueba el Flujo 2 de punta a punta.
 #
 # Secretos del repositorio (Settings > Secrets and variables > Actions), sacados de
 # AWS Details del Learner Lab. Vencen con la sesión del lab (~4 h); se actualizan con
@@ -90,7 +91,7 @@ jobs:
     needs: test
     if: github.ref == 'refs/heads/main' && (github.event_name == 'push' || github.event_name == 'workflow_dispatch')
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    timeout-minutes: 45
     # Queda registrado en la pestaña Deployments del repo (evidencia de cada despliegue).
     environment: aws-learner-lab
     concurrency:
@@ -114,19 +115,39 @@ jobs:
           aws-session-token: ${{ secrets.AWS_SESSION_TOKEN }}
           aws-region: us-east-1
 
-      # ---------------------------------------------------------------------------------
-      # Parte de Luis Alberto: cuando su despliegue quede listo en infra/, se agrega aquí,
-      # antes del Flujo 2. Ejemplo:
-      #
-      # - name: Desplegar <lo de Luis Alberto>
-      #   run: bash infra/<su_script>.sh up
-      # ---------------------------------------------------------------------------------
+      # rds.sh aplica schema.sql por Session Manager. El runner no trae el plugin.
+      - name: Session Manager plugin
+        run: |
+          curl -fsSLo /tmp/session-manager-plugin.deb https://s3.amazonaws.com/session-manager-downloads/plugin/latest/ubuntu_64bit/session-manager-plugin.deb
+          sudo dpkg -i /tmp/session-manager-plugin.deb
+
+      # api.sh exige el tópico pinwatch-events y pinwatch-db-sg. La RDS se alcanza
+      # desde el bastión, así que el orden es el de infra/up.sh.
+      - name: Secreto, SNS, bastión y RDS
+        run: |
+          bash infra/secrets.sh up
+          bash infra/sns.sh up
+          bash infra/ec2.sh up
+          bash infra/rds.sh up
 
       - name: Desplegar Lambda del Flujo 2
         run: bash infra/image_processor.sh up
 
       - name: Prueba de humo del Flujo 2
         run: bash infra/smoke_flujo2.sh
+
+      - name: Desplegar la API
+        run: bash infra/api.sh up
+
+      - uses: actions/setup-node@v6
+        with:
+          node-version: 22
+
+      - name: Publicar el frontend
+        run: |
+          corepack enable
+          corepack prepare pnpm@12.11.2 --activate
+          bash infra/web.sh up
 
       - name: Resumen del despliegue
         if: always()
@@ -143,4 +164,17 @@ jobs:
               --query '[FunctionName, State, LastUpdateStatus, Runtime, LastModified]' --output text 2>/dev/null |
               awk -F'\t' '{ printf "| %s | %s | %s | %s | %s |\n", $1, $2, $3, $4, $5 }' ||
               echo "| pinwatch-image-processor | no existe | | | |"
+            aws lambda get-function-configuration --function-name pinwatch-api \
+              --query '[FunctionName, State, LastUpdateStatus, Runtime, LastModified]' --output text 2>/dev/null |
+              awk -F'\t' '{ printf "| %s | %s | %s | %s | %s |\n", $1, $2, $3, $4, $5 }' ||
+              echo "| pinwatch-api | no existe | | | |"
+            echo
+            api_id="$(aws apigatewayv2 get-apis --query "Items[?Name=='pinwatch-api'].ApiId | [0]" --output text 2>/dev/null || true)"
+            if [[ -n "$api_id" && "$api_id" != "None" ]]; then
+              echo "- API: \`$(aws apigatewayv2 get-api --api-id "$api_id" --query ApiEndpoint --output text)\`"
+            fi
+            account="$(aws sts get-caller-identity --query Account --output text 2>/dev/null || true)"
+            if [[ -n "$account" && "$account" != "None" ]]; then
+              echo "- Sitio: \`http://pinwatch-web-${account}.s3-website-${AWS_REGION}.amazonaws.com\`"
+            fi
           } >>"$GITHUB_STEP_SUMMARY"

@@ -165,7 +165,7 @@ El workflow `.github/workflows/ci-cd.yml` tiene dos jobs:
 | Job | Cuándo corre | Qué hace |
 | --- | --- | --- |
 | **Pruebas del backend (pytest)** | En cada pull request hacia `main` y en cada push a `main` | Instala `backend/requirements-dev.txt` en Python 3.14 (el runtime de las Lambdas) y corre `pytest` sobre `backend/tests/`. No toca AWS: usa credenciales falsas, moto y SQLite. Deja una tabla con el resultado en el resumen de la corrida. |
-| **Despliegue en AWS (Learner Lab)** | Solo en push a `main` (al hacer merge de un PR) o a mano con *Run workflow*, y solo si las pruebas pasaron | Con las credenciales del Learner Lab corre `bash infra/image_processor.sh up` (bucket processed, Lambda del Flujo 2 y trigger de S3) y luego `bash infra/smoke_flujo2.sh`, que sube una imagen de prueba, espera la miniatura y borra todo. Queda registrado en *Deployments* como `aws-learner-lab`. |
+| **Despliegue en AWS (Learner Lab)** | Solo en push a `main` (al hacer merge de un PR) o a mano con *Run workflow*, y solo si las pruebas pasaron | Con las credenciales del Learner Lab levanta secreto, SNS, bastión y RDS, corre `bash infra/image_processor.sh up` y `bash infra/smoke_flujo2.sh`, y después `bash infra/api.sh up` y `bash infra/web.sh up`. Queda registrado en *Deployments* como `aws-learner-lab`. |
 
 Dos despliegues nunca corren al mismo tiempo, y un push nuevo a un PR cancela la corrida anterior de ese PR.
 
